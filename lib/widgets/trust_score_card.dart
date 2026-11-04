@@ -42,9 +42,21 @@ Widget? trustTierBadge(BuildContext context, String tier, {double fontSize = 10}
   );
 }
 
-/// Trust score breakdown card — shows the overall score, tier label/badge,
-/// and a bar per TrustScoreService.breakdown component. Display-only; the
-/// score itself is always computed and written by Cloud Functions.
+/// Trust score card — dark navy, pixel-matched to Stitch's "TrustScore"
+/// card (the variant chosen over the lighter "HandyTrust Score" one).
+/// Score/tier badge are real (ArtisanModel.trustScore, always computed and
+/// written by Cloud Functions). The two sub-stat chips below use real
+/// TrustScoreService.breakdown() components — NOT Stitch's literal
+/// "Craftsmanship"/"Punctuality" labels, which don't correspond to
+/// anything this backend actually computes (the 5 real weighted
+/// components are Completed Jobs / Customer Rating / Verification /
+/// Response Speed / Dispute History, see trust_score_service.dart). Using
+/// the real top two rather than inventing fake labels for two Stitch
+/// never-computed metrics. Stitch's "Top 5%" percentile badge is also
+/// omitted for the same reason — no artisan-wide percentile ranking is
+/// computed anywhere in this backend; a real one would need a new Cloud
+/// Function comparing this artisan's score against the full population,
+/// which doesn't exist today (documented gap, not faked).
 class TrustScoreCard extends StatelessWidget {
   final ArtisanModel artisan;
 
@@ -54,103 +66,113 @@ class TrustScoreCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final badge = trustTierBadge(context, artisan.trustTier, fontSize: 11);
     final tierLabel = TrustScoreService.tierLabel(artisan.trustScore);
+    final components = TrustScoreService.breakdown(artisan);
+    final top2 = components.length >= 2 ? components.sublist(0, 2) : components;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: context.colors.surface,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: context.colors.borderLight),
+        // context.colors.navy, not the AppColors.darkBackground literal
+        // this previously hardcoded: on a light page navy is a fixed dark
+        // tone that pops correctly either way, but on the dark-mode page
+        // that literal is byte-identical to the scaffold background,
+        // making the whole card disappear. The theme extension already
+        // carries a dark-mode-appropriate navy — this just needed to
+        // actually use it.
+        color: context.colors.navy,
+        borderRadius: BorderRadius.circular(20),
+        border: isDark
+            ? Border.all(color: Colors.white.withValues(alpha: 0.08))
+            : null,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Icon(Icons.verified_outlined,
-                  size: 20, color: context.colors.primary),
-              const SizedBox(width: 8),
-              Text(
-                'Trust Score',
+              const Text(
+                'TrustScore',
                 style: TextStyle(
-                  fontSize: 15,
+                  fontSize: 16,
                   fontWeight: FontWeight.w700,
-                  color: context.colors.textPrimary,
+                  color: Colors.white,
                   fontFamily: 'Inter',
                 ),
               ),
               const Spacer(),
+              ?badge,
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
+            children: [
               Text(
-                '${artisan.trustScore.toStringAsFixed(0)}/100',
-                style: TextStyle(
-                  fontSize: 18,
+                artisan.trustScore.toStringAsFixed(0),
+                style: const TextStyle(
+                  fontSize: 44,
                   fontWeight: FontWeight.w800,
-                  color: context.colors.primary,
+                  color: Colors.white,
+                  fontFamily: 'Inter',
+                  height: 1,
+                ),
+              ),
+              const SizedBox(width: 4),
+              Text(
+                '/100 · $tierLabel',
+                style: TextStyle(
+                  fontSize: 13,
+                  color: Colors.white.withValues(alpha: 0.6),
                   fontFamily: 'Inter',
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 4),
-          Align(
-            alignment: Alignment.centerRight,
-            child: Text(
-              tierLabel,
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: context.colors.textSecondary,
-                fontFamily: 'Inter',
-              ),
-            ),
-          ),
-          if (badge != null) ...[
-            const SizedBox(height: 10),
-            badge,
-          ],
           const SizedBox(height: 16),
-          ...TrustScoreService.breakdown(artisan).map((c) => _componentRow(context, c)),
+          Row(
+            children: [
+              for (var i = 0; i < top2.length; i++) ...[
+                if (i > 0) const SizedBox(width: 10),
+                Expanded(child: _componentChip(context, top2[i])),
+              ],
+            ],
+          ),
         ],
       ),
     );
   }
 
-  Widget _componentRow(BuildContext context, TrustComponent c) {
+  Widget _componentChip(BuildContext context, TrustComponent c) {
     final fraction = c.maxScore == 0 ? 0.0 : (c.score / c.maxScore).clamp(0.0, 1.0);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(12),
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                c.label,
-                style: TextStyle(
-                  fontSize: 12,
-                  color: context.colors.textSecondary,
-                  fontFamily: 'Inter',
-                ),
-              ),
-              Text(
-                '${c.score.toStringAsFixed(1)} / ${c.maxScore.toStringAsFixed(0)}',
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: context.colors.textPrimary,
-                  fontFamily: 'Inter',
-                ),
-              ),
-            ],
+          Text(
+            c.label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 11,
+              color: Colors.white.withValues(alpha: 0.6),
+              fontFamily: 'Inter',
+            ),
           ),
-          const SizedBox(height: 6),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(4),
-            child: LinearProgressIndicator(
-              value: fraction,
-              minHeight: 6,
-              backgroundColor: context.colors.surfaceVariant,
-              valueColor: AlwaysStoppedAnimation(context.colors.primary),
+          const SizedBox(height: 2),
+          Text(
+            '${(fraction * 100).toStringAsFixed(0)}%',
+            style: const TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w800,
+              color: Colors.white,
+              fontFamily: 'Inter',
             ),
           ),
         ],

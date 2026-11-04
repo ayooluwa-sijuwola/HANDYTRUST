@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
+import '../utils/image_privacy.dart';
 
 class StorageService {
   final FirebaseStorage _storage = FirebaseStorage.instance;
@@ -16,19 +17,26 @@ class StorageService {
 
   /// Upload a job image. The path includes [userId] so Storage rules can
   /// verify that only the uploader can write to their own sub-folder:
-  ///   jobs/{jobId}/{userId}/image_{index}.jpg
+  ///   jobs/{jobId}/{userId}/[subfolder/]image_{index}.jpg
+  ///
+  /// [subfolder] can be 'before' or 'after' to separate arrival/completion
+  /// photos within the same job. Defaults to empty (root of user folder).
   Future<String> uploadJobImageBytes({
     required String jobId,
     required String userId,
     required int index,
     required Uint8List bytes,
+    String subfolder = '',
   }) async {
+    // Stage 7.1 (F-2): strip GPS/EXIF from EVERY photo, whatever its size.
+    bytes = await ImagePrivacy.sanitize(bytes);
     if (bytes.isEmpty) throw Exception('Image payload is empty.');
     if (bytes.lengthInBytes > _maxUploadBytes) {
       throw Exception('Image exceeds the 5 MB limit.');
     }
 
-    final path = 'jobs/$jobId/$userId/image_$index.jpg';
+    final sub = subfolder.isEmpty ? '' : '$subfolder/';
+    final path = 'jobs/$jobId/$userId/${sub}image_$index.jpg';
     final ref = _storage.ref(path);
     final metadata = SettableMetadata(
       contentType: 'image/jpeg',
@@ -47,6 +55,8 @@ class StorageService {
     required String userId,
     required Uint8List bytes,
   }) async {
+    // Stage 7.1 (F-2): strip GPS/EXIF from EVERY photo, whatever its size.
+    bytes = await ImagePrivacy.sanitize(bytes);
     if (bytes.lengthInBytes > _maxUploadBytes) {
       throw Exception('Photo exceeds the 5 MB limit.');
     }
@@ -70,6 +80,8 @@ class StorageService {
     required String type,
     required Uint8List bytes,
   }) async {
+    // Stage 7.1 (F-2): strip GPS/EXIF from EVERY photo, whatever its size.
+    bytes = await ImagePrivacy.sanitize(bytes);
     if (bytes.isEmpty) {
       throw Exception('$type photo is empty — please retake it.');
     }
@@ -124,6 +136,8 @@ class StorageService {
     required int index,
     required Uint8List bytes,
   }) async {
+    // Stage 7.1 (F-2): strip GPS/EXIF from EVERY photo, whatever its size.
+    bytes = await ImagePrivacy.sanitize(bytes);
     if (bytes.lengthInBytes > _maxUploadBytes) {
       throw Exception('Image exceeds the 5 MB limit.');
     }
@@ -150,6 +164,8 @@ class StorageService {
     required int index,
     required Uint8List bytes,
   }) async {
+    // Stage 7.1 (F-2): strip GPS/EXIF from EVERY photo, whatever its size.
+    bytes = await ImagePrivacy.sanitize(bytes);
     if (bytes.lengthInBytes > _maxUploadBytes) {
       throw Exception('Photo exceeds the 5 MB limit.');
     }

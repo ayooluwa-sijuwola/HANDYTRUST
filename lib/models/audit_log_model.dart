@@ -15,6 +15,11 @@ enum JobActionType {
   adminOverride,        // admin forced a state change bypassing state machine
   adminEscrowRefund,    // admin forced refund (→ cancelled + refundReason field)
   quoteAccepted,        // requested → matched via QuoteService.acceptQuote
+  progressUpdated,      // inProgress: artisan advances the progress stage
+  agreementConfirmedByCustomer,  // inChat: customer locks terms, → pendingArtisanConfirmation
+  agreementAcceptedByArtisan,    // inChat: artisan accepts → agreementStatus confirmed
+  agreementChangesRequested,     // inChat: artisan sends terms back → changesRequested
+  paidCancellationRequested,     // escrowLocked/inProgress: party asks admin to cancel (no status change)
 }
 
 /// The identity role of the actor who triggered a job mutation.

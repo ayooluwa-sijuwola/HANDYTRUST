@@ -2,9 +2,12 @@
   "name": "functions",
   "description": "HandyTrust Cloud Functions",
   "engines": {
-    "node": "20"
+    "node": "22"
   },
   "main": "index.js",
+  "scripts": {
+    "test": "node --test test/escrow_release_guards.test.js test/webhook_signature.test.js test/payment_init_idempotency.test.js test/review_rating_pipeline.test.js test/stage2_authorization.test.js test/stage3_payments.test.js test/stage3_escrow_emulator.test.js test/stage4_pure.test.js test/stage4_settlement_emulator.test.js test/stage5_lifecycle_emulator.test.js test/stage6_emulator.test.js test/stage7_migration_emulator.test.js test/stage7_1_chargeback_emulator.test.js test/stage7_2_policy_trust_emulator.test.js test/runtime_config.test.js"
+  },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
     "axios": "^1.7.7",

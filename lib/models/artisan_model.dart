@@ -23,8 +23,15 @@ class ArtisanModel extends UserModel {
   final int totalJobs;
   final int completedJobs;
   final double responseTimeMinutes;
+  /// Stage 6 (policy D8): the artisan's GPS service location, captured
+  /// once on request (no background tracking). Null until they set it.
   final double? latitude;
   final double? longitude;
+  /// Manually entered service address (D8), shown on their profile area.
+  final String? serviceAddress;
+  /// How far they travel for work; bounded by config/platform.
+  final double? serviceRadiusKm;
+  final String? serviceGeohash4;
   final String? bio;
   final String? profileImageUrl;
   final List<String> portfolioImageUrls;
@@ -36,6 +43,14 @@ class ArtisanModel extends UserModel {
 
   /// 'unverified' | 'id_submitted' | 'id_verified' | 'trusted'
   final String verificationStatus;
+
+  /// Admin-only, admin-set flag (see firestore.rules' artisans/{uid} update
+  /// rule — not in the owner-writable field set). Lets an admin designate
+  /// specific accounts as beta testers who may quote/be matched without
+  /// completing real identity verification, without changing what
+  /// verificationStatus itself means or how it's earned for anyone else.
+  /// See design/BETA_TESTING_GUIDE.md.
+  final bool betaTester;
 
   /// Composite trust score 0–100, updated by Cloud Function after each job
   final double trustScore;
@@ -83,6 +98,8 @@ class ArtisanModel extends UserModel {
   ArtisanModel({
     required super.uid,
     required super.name,
+    super.username,
+    super.photoUrl,
     super.email,
     super.phoneNumber,
     super.roles,
@@ -101,6 +118,9 @@ class ArtisanModel extends UserModel {
     this.responseTimeMinutes = 30.0,
     this.latitude,
     this.longitude,
+    this.serviceAddress,
+    this.serviceRadiusKm,
+    this.serviceGeohash4,
     this.bio,
     this.profileImageUrl,
     this.portfolioImageUrls = const [],
@@ -108,6 +128,7 @@ class ArtisanModel extends UserModel {
     this.isAvailable = false,
     this.approvalStatus = 'pending',
     this.verificationStatus = 'unverified',
+    this.betaTester = false,
     this.trustScore = 0.0,
     this.responseRatePercent = 100.0,
     this.cancellationRatePercent = 0.0,
@@ -131,6 +152,8 @@ class ArtisanModel extends UserModel {
     return ArtisanModel(
       uid: json['uid'] as String,
       name: json['name'] as String? ?? '',
+      username: json['username'] as String?,
+      photoUrl: json['photoUrl'] as String?,
       email: json['email'] as String?,
       phoneNumber: json['phoneNumber'] as String?,
       roles: roles,
@@ -149,6 +172,9 @@ class ArtisanModel extends UserModel {
       responseTimeMinutes: (json['responseTimeMinutes'] as num?)?.toDouble() ?? 30.0,
       latitude: (json['latitude'] as num?)?.toDouble(),
       longitude: (json['longitude'] as num?)?.toDouble(),
+      serviceAddress: json['serviceAddress'] as String?,
+      serviceRadiusKm: (json['serviceRadiusKm'] as num?)?.toDouble(),
+      serviceGeohash4: json['serviceGeohash4'] as String?,
       bio: json['bio'] as String?,
       profileImageUrl: json['profileImageUrl'] as String?,
       portfolioImageUrls: List<String>.from(json['portfolioImageUrls'] ?? []),
@@ -156,6 +182,7 @@ class ArtisanModel extends UserModel {
       isAvailable: json['isAvailable'] as bool? ?? false,
       approvalStatus: json['approvalStatus'] as String? ?? 'pending',
       verificationStatus: json['verificationStatus'] as String? ?? 'unverified',
+      betaTester: json['betaTester'] as bool? ?? false,
       trustScore: (json['trustScore'] as num?)?.toDouble() ?? 0.0,
       responseRatePercent: (json['responseRatePercent'] as num?)?.toDouble() ?? 100.0,
       cancellationRatePercent: (json['cancellationRatePercent'] as num?)?.toDouble() ?? 0.0,
@@ -186,6 +213,9 @@ class ArtisanModel extends UserModel {
       'responseTimeMinutes': responseTimeMinutes,
       if (latitude != null) 'latitude': latitude,
       if (longitude != null) 'longitude': longitude,
+      if (serviceAddress != null) 'serviceAddress': serviceAddress,
+      if (serviceRadiusKm != null) 'serviceRadiusKm': serviceRadiusKm,
+      if (serviceGeohash4 != null) 'serviceGeohash4': serviceGeohash4,
       if (bio != null) 'bio': bio,
       if (profileImageUrl != null) 'profileImageUrl': profileImageUrl,
       'portfolioImageUrls': portfolioImageUrls,
@@ -193,6 +223,7 @@ class ArtisanModel extends UserModel {
       'isAvailable': isAvailable,
       'approvalStatus': approvalStatus,
       'verificationStatus': verificationStatus,
+      'betaTester': betaTester,
       'trustScore': trustScore,
       'responseRatePercent': responseRatePercent,
       'cancellationRatePercent': cancellationRatePercent,
@@ -209,6 +240,8 @@ class ArtisanModel extends UserModel {
   @override
   ArtisanModel copyWith({
     String? name,
+    String? username,
+    String? photoUrl,
     String? email,
     String? phoneNumber,
     List<String>? roles,
@@ -218,6 +251,7 @@ class ArtisanModel extends UserModel {
     bool? emailVerified,
     bool? notificationsEnabled,
     String? accountStatus,
+    bool? accountDeletionRequested,
     double? rating,
     int? totalRatings,
     int? totalJobs,
@@ -232,6 +266,7 @@ class ArtisanModel extends UserModel {
     bool? isAvailable,
     String? approvalStatus,
     String? verificationStatus,
+    bool? betaTester,
     double? trustScore,
     double? responseRatePercent,
     double? cancellationRatePercent,
@@ -244,6 +279,8 @@ class ArtisanModel extends UserModel {
       ArtisanModel(
         uid: uid,
         name: name ?? this.name,
+        username: username ?? this.username,
+        photoUrl: photoUrl ?? this.photoUrl,
         email: email ?? this.email,
         phoneNumber: phoneNumber ?? this.phoneNumber,
         roles: roles ?? this.roles,
@@ -269,6 +306,7 @@ class ArtisanModel extends UserModel {
         isAvailable: isAvailable ?? this.isAvailable,
         approvalStatus: approvalStatus ?? this.approvalStatus,
         verificationStatus: verificationStatus ?? this.verificationStatus,
+        betaTester: betaTester ?? this.betaTester,
         trustScore: trustScore ?? this.trustScore,
         responseRatePercent: responseRatePercent ?? this.responseRatePercent,
         cancellationRatePercent: cancellationRatePercent ?? this.cancellationRatePercent,

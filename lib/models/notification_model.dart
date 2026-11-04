@@ -10,6 +10,8 @@ class NotificationModel {
   final DateTime createdAt;
   final DateTime? readAt;
   final String? jobId;
+  /// Stage 6: server-set deep link (e.g. /job/{id}); see safeNotificationRoute.
+  final String? route;
 
   const NotificationModel({
     required this.id,
@@ -21,6 +23,7 @@ class NotificationModel {
     required this.createdAt,
     this.readAt,
     this.jobId,
+    this.route,
   });
 
   factory NotificationModel.fromJson(Map<String, dynamic> json) {
@@ -45,6 +48,7 @@ class NotificationModel {
       createdAt: toDate(json['createdAt']),
       readAt: toDateNullable(json['readAt']),
       jobId: json['jobId'] as String?,
+      route: json['route'] as String?,
     );
   }
 
@@ -58,5 +62,6 @@ class NotificationModel {
         'createdAt': Timestamp.fromDate(createdAt),
         if (readAt != null) 'readAt': Timestamp.fromDate(readAt!),
         if (jobId != null) 'jobId': jobId,
+        if (route != null) 'route': route,
       };
 }

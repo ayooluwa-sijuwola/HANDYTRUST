@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import '../../models/user_model.dart';
 import '../../providers/auth_provider.dart';
 import '../../theme/app_theme.dart';
+import '../../widgets/auth_scaffold.dart';
 
 class RegisterScreen extends ConsumerStatefulWidget {
   const RegisterScreen({super.key});
@@ -68,165 +69,182 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
 
     return Scaffold(
       backgroundColor: context.colors.background,
-      appBar: AppBar(
-        backgroundColor: context.colors.background,
-        elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () => context.pop(),
-        ),
-      ),
       body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
-          child: Form(
-            key: _formKey,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Text(
-                  'Create your account',
-                  style: Theme.of(context)
-                      .textTheme
-                      .headlineMedium
-                      ?.copyWith(fontWeight: FontWeight.w700, color: context.colors.textPrimary),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Join HandyTrust — Nigeria\'s trusted service marketplace',
-                  style: Theme.of(context)
-                      .textTheme
-                      .bodyMedium
-                      ?.copyWith(color: context.colors.textSecondary),
-                ),
-                const SizedBox(height: 28),
+        child: AuthWebLayout(
+          child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.arrow_back),
+                    onPressed: () => context.pop(),
+                  ),
+                  const SizedBox(width: 4),
+                  const AuthBrandHeader(),
+                ],
+              ),
+              const SizedBox(height: 20),
+              AuthCard(
+                child: Form(
+                  key: _formKey,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(
+                        'Create Your Account',
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                              fontWeight: FontWeight.w800,
+                              color: context.colors.textPrimary,
+                            ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        "Join HandyTrust — Nigeria's trusted service marketplace",
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodyMedium
+                            ?.copyWith(color: context.colors.textSecondary),
+                      ),
+                      const SizedBox(height: 28),
 
-                // Role selection
-                Row(
-                  children: [
-                    Expanded(child: _RoleTile(
-                      label: 'I need services',
-                      sublabel: 'Customer',
-                      icon: Icons.person_search_outlined,
-                      selected: _selectedRole == 'customer',
-                      onTap: () => setState(() => _selectedRole = 'customer'),
-                    )),
-                    const SizedBox(width: 12),
-                    Expanded(child: _RoleTile(
-                      label: 'I offer services',
-                      sublabel: 'Artisan',
-                      icon: Icons.handyman_outlined,
-                      selected: _selectedRole == 'artisan',
-                      onTap: () => setState(() => _selectedRole = 'artisan'),
-                    )),
-                  ],
-                ),
-                const SizedBox(height: 24),
+                      // Role selection
+                      Row(
+                        children: [
+                          Expanded(child: _RoleTile(
+                            label: 'I need services',
+                            sublabel: 'Customer',
+                            icon: Icons.person_search_outlined,
+                            selected: _selectedRole == 'customer',
+                            onTap: () => setState(() => _selectedRole = 'customer'),
+                          )),
+                          const SizedBox(width: 12),
+                          Expanded(child: _RoleTile(
+                            label: 'I offer services',
+                            sublabel: 'Artisan',
+                            icon: Icons.handyman_outlined,
+                            selected: _selectedRole == 'artisan',
+                            onTap: () => setState(() => _selectedRole = 'artisan'),
+                          )),
+                        ],
+                      ),
+                      const SizedBox(height: 24),
 
-                TextFormField(
-                  controller: _nameController,
-                  textCapitalization: TextCapitalization.words,
-                  decoration: const InputDecoration(
-                    labelText: 'Full name',
-                    prefixIcon: Icon(Icons.person_outline),
+                      AuthTextField(
+                        label: 'Full Name',
+                        controller: _nameController,
+                        hintText: 'Your full name',
+                        prefixIcon: Icons.person_outline,
+                        textCapitalization: TextCapitalization.words,
+                        validator: (v) {
+                          if (v == null || v.trim().length < 2) return 'Enter your full name';
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 20),
+
+                      AuthTextField(
+                        label: 'Email Address',
+                        controller: _emailController,
+                        hintText: 'name@company.com',
+                        prefixIcon: Icons.email_outlined,
+                        keyboardType: TextInputType.emailAddress,
+                        autofillHints: const [AutofillHints.email],
+                        validator: (v) {
+                          if (v == null || v.trim().isEmpty) return 'Email is required';
+                          final re = RegExp(r'^[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}$');
+                          if (!re.hasMatch(v.trim())) return 'Enter a valid email address';
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 20),
+
+                      AuthTextField(
+                        label: 'City / Area (optional)',
+                        controller: _locationController,
+                        hintText: 'e.g. Lekki, Lagos',
+                        prefixIcon: Icons.location_on_outlined,
+                      ),
+                      const SizedBox(height: 20),
+
+                      AuthTextField(
+                        label: 'Password',
+                        controller: _passwordController,
+                        obscureText: _obscurePassword,
+                        hintText: '••••••••',
+                        prefixIcon: Icons.lock_outline,
+                        autofillHints: const [AutofillHints.newPassword],
+                        suffixIcon: IconButton(
+                          icon: Icon(_obscurePassword
+                              ? Icons.visibility_outlined
+                              : Icons.visibility_off_outlined),
+                          onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+                        ),
+                        validator: (v) {
+                          if (v == null || v.length < 8) return 'Password must be at least 8 characters';
+                          if (!v.contains(RegExp(r'[A-Z]'))) return 'Include at least one uppercase letter';
+                          if (!v.contains(RegExp(r'[0-9]'))) return 'Include at least one number';
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 20),
+
+                      AuthTextField(
+                        label: 'Confirm Password',
+                        controller: _confirmController,
+                        obscureText: _obscureConfirm,
+                        hintText: '••••••••',
+                        prefixIcon: Icons.lock_outline,
+                        suffixIcon: IconButton(
+                          icon: Icon(_obscureConfirm
+                              ? Icons.visibility_outlined
+                              : Icons.visibility_off_outlined),
+                          onPressed: () => setState(() => _obscureConfirm = !_obscureConfirm),
+                        ),
+                        validator: (v) {
+                          if (v != _passwordController.text) return 'Passwords do not match';
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 28),
+
+                      AuthButton(
+                        label: 'Create Account',
+                        loading: authState.isLoading,
+                        onPressed: _register,
+                        trailingIcon: Icons.arrow_forward_rounded,
+                      ),
+                      const SizedBox(height: 24),
+
+                      const AuthDivider(),
+                      const SizedBox(height: 20),
+                      const SocialSignInRow(),
+                      const SizedBox(height: 24),
+
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text('Already have an account? ',
+                              style: TextStyle(color: context.colors.textSecondary)),
+                          TextButton(
+                            style: TextButton.styleFrom(padding: EdgeInsets.zero),
+                            onPressed: () => context.go('/login'),
+                            child: const Text('Sign In', style: TextStyle(fontWeight: FontWeight.w700)),
+                          ),
+                        ],
+                      ),
+                    ],
                   ),
-                  validator: (v) {
-                    if (v == null || v.trim().length < 2) return 'Enter your full name';
-                    return null;
-                  },
                 ),
-                const SizedBox(height: 16),
-                TextFormField(
-                  controller: _emailController,
-                  keyboardType: TextInputType.emailAddress,
-                  autofillHints: const [AutofillHints.email],
-                  decoration: const InputDecoration(
-                    labelText: 'Email address',
-                    prefixIcon: Icon(Icons.email_outlined),
-                  ),
-                  validator: (v) {
-                    if (v == null || v.trim().isEmpty) return 'Email is required';
-                    final re = RegExp(r'^[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}$');
-                    if (!re.hasMatch(v.trim())) return 'Enter a valid email address';
-                    return null;
-                  },
-                ),
-                const SizedBox(height: 16),
-                TextFormField(
-                  controller: _locationController,
-                  decoration: const InputDecoration(
-                    labelText: 'City / Area (optional)',
-                    prefixIcon: Icon(Icons.location_on_outlined),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                TextFormField(
-                  controller: _passwordController,
-                  obscureText: _obscurePassword,
-                  autofillHints: const [AutofillHints.newPassword],
-                  decoration: InputDecoration(
-                    labelText: 'Password',
-                    prefixIcon: const Icon(Icons.lock_outline),
-                    suffixIcon: IconButton(
-                      icon: Icon(_obscurePassword
-                          ? Icons.visibility_outlined
-                          : Icons.visibility_off_outlined),
-                      onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
-                    ),
-                  ),
-                  validator: (v) {
-                    if (v == null || v.length < 8) return 'Password must be at least 8 characters';
-                    if (!v.contains(RegExp(r'[A-Z]'))) return 'Include at least one uppercase letter';
-                    if (!v.contains(RegExp(r'[0-9]'))) return 'Include at least one number';
-                    return null;
-                  },
-                ),
-                const SizedBox(height: 16),
-                TextFormField(
-                  controller: _confirmController,
-                  obscureText: _obscureConfirm,
-                  decoration: InputDecoration(
-                    labelText: 'Confirm password',
-                    prefixIcon: const Icon(Icons.lock_outline),
-                    suffixIcon: IconButton(
-                      icon: Icon(_obscureConfirm
-                          ? Icons.visibility_outlined
-                          : Icons.visibility_off_outlined),
-                      onPressed: () => setState(() => _obscureConfirm = !_obscureConfirm),
-                    ),
-                  ),
-                  validator: (v) {
-                    if (v != _passwordController.text) return 'Passwords do not match';
-                    return null;
-                  },
-                ),
-                const SizedBox(height: 28),
-                ElevatedButton(
-                  onPressed: authState.isLoading ? null : _register,
-                  child: authState.isLoading
-                      ? const SizedBox(
-                          height: 20,
-                          width: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                        )
-                      : const Text('Create account'),
-                ),
-                const SizedBox(height: 16),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text('Already have an account? ',
-                        style: TextStyle(color: context.colors.textSecondary)),
-                    TextButton(
-                      onPressed: () => context.go('/login'),
-                      child: const Text('Sign in'),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 24),
-              ],
-            ),
+              ),
+              const AuthFooter(),
+            ],
           ),
+        ),
         ),
       ),
     );
@@ -256,7 +274,7 @@ class _RoleTile extends StatelessWidget {
         duration: const Duration(milliseconds: 180),
         padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
         decoration: BoxDecoration(
-          color: selected ? context.colors.primary.withValues(alpha: 0.08) : context.colors.surface,
+          color: selected ? context.colors.primary.withValues(alpha: 0.08) : context.colors.surfaceVariant,
           border: Border.all(
             color: selected ? context.colors.primary : context.colors.border,
             width: selected ? 2 : 1,

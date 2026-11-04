@@ -2,9 +2,11 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import '../../providers/artisan_provider.dart';
 import '../../providers/auth_provider.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/error_snackbar.dart';
+import '../../widgets/service_area_card.dart';
 
 /// Lets an artisan register/operate under a business name instead of their
 /// personal name. Public-facing — writes to /artisans/{uid}, the same doc
@@ -290,6 +292,14 @@ class _BusinessProfileScreenState extends ConsumerState<BusinessProfileScreen> {
                           ),
                         ),
                 ),
+                // Stage 6 (policy D8): service area for distance-first
+                // matching — saved independently of the business form.
+                const SizedBox(height: 24),
+                Consumer(builder: (context, ref, _) {
+                  final uid = ref.watch(currentUserProvider).asData?.value?.uid;
+                  final artisan = uid == null ? null : ref.watch(artisanProfileProvider(uid)).asData?.value;
+                  return artisan == null ? const SizedBox.shrink() : ServiceAreaCard(artisan: artisan);
+                }),
               ],
             ),
           ),

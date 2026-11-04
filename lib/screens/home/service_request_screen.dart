@@ -1,4 +1,3 @@
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
@@ -13,8 +12,11 @@ import '../../core/constants/service_categories.dart';
 import '../../providers/ai_provider.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/job_provider.dart';
+import '../../providers/platform_config_provider.dart';
+import '../../theme/app_design_system.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/error_snackbar.dart';
+import '../../widgets/web_content_wrapper.dart';
 
 class ServiceRequestScreen extends ConsumerStatefulWidget {
   final String? initialCategory;
@@ -150,12 +152,32 @@ class _ServiceRequestScreenState extends ConsumerState<ServiceRequestScreen> {
   Future<void> _fetchLocation() async {
     setState(() => _fetchingLocation = true);
     try {
+      // Checked separately from permission: on iOS/Android, Location
+      // Services can be off system-wide independent of this app's own
+      // permission grant. Checking this first gives a clearer, more
+      // actionable message than letting getCurrentPosition() below throw a
+      // generic LocationServiceDisabledException into the catch-all.
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        if (mounted) {
+          showErrorSnackbar(context,
+              'Location services are turned off. Enable them in Settings, or enter your address manually.');
+        }
+        return;
+      }
+
       var permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
       }
-      if (permission == LocationPermission.denied ||
-          permission == LocationPermission.deniedForever) {
+      if (permission == LocationPermission.deniedForever) {
+        if (mounted) {
+          showErrorSnackbar(context,
+              'Location permission was permanently denied. Enable it in Settings, or enter your address manually.');
+        }
+        return;
+      }
+      if (permission == LocationPermission.denied) {
         if (mounted) {
           showErrorSnackbar(
               context, 'Location permission denied. Enter address manually.');
@@ -172,7 +194,8 @@ class _ServiceRequestScreenState extends ConsumerState<ServiceRequestScreen> {
       if (placemarks.isNotEmpty) {
         final p = placemarks.first;
         final parts = [p.subLocality, p.locality, p.administrativeArea]
-            .where((s) => s != null && s!.isNotEmpty)
+            .whereType<String>()
+            .where((s) => s.isNotEmpty)
             .toList();
         setState(() {
           _lat = position.latitude;
@@ -181,6 +204,11 @@ class _ServiceRequestScreenState extends ConsumerState<ServiceRequestScreen> {
         });
       }
     } catch (_) {
+      // Deliberately broad: covers LocationServiceDisabledException (a race
+      // where services are disabled between the check above and
+      // getCurrentPosition below), platform channel errors, and geocoding
+      // failures alike — the app must never crash or hang here, only ever
+      // fall back to manual address entry.
       if (mounted) {
         showErrorSnackbar(
             context, 'Could not get location. Enter address manually.');
@@ -283,6 +311,16 @@ class _ServiceRequestScreenState extends ConsumerState<ServiceRequestScreen> {
     }
   }
 
+  /// Required-field completion, for the progress bar only — purely visual,
+  /// doesn't gate submission (the Form's own validators still do that).
+  double get _completionFraction {
+    var done = 0;
+    if (_selectedCategory != null) done++;
+    if (_descriptionController.text.trim().length >= 20) done++;
+    if (_images.isNotEmpty) done++;
+    return done / 3;
+  }
+
   @override
   Widget build(BuildContext context) {
     final jobState = ref.watch(jobRequestNotifierProvider);
@@ -293,49 +331,105 @@ class _ServiceRequestScreenState extends ConsumerState<ServiceRequestScreen> {
         backgroundColor: context.colors.background,
         elevation: 0,
         title: const Text(
-          'Post a Job',
+          'Post a New Job',
           style: TextStyle(fontFamily: 'Inter', fontWeight: FontWeight.w700),
         ),
       ),
       body: SafeArea(
-        child: Form(
+        child: WebContentWrapper(
+          maxWidth: 640,
+          child: Form(
           key: _formKey,
           child: ListView(
             padding: const EdgeInsets.all(20),
             children: [
-              _SectionLabel('What service do you need?'),
+              _ProgressBar(fraction: _completionFraction),
+              const SizedBox(height: 20),
+              _SectionLabel('Select Category',
+                  icon: Icons.category_outlined,
+                  complete: _selectedCategory != null),
               const SizedBox(height: 8),
-              DropdownButtonFormField<String>(
-                value: _selectedCategory,
-                decoration: InputDecoration(
-                  hintText: 'Select a category',
-                  prefixIcon: const Icon(Icons.handyman_outlined),
-                  filled: true,
-                  fillColor: context.colors.surface,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(color: context.colors.border),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(color: context.colors.border),
-                  ),
-                ),
-                items: ServiceCategories.all
-                    .map((c) => DropdownMenuItem(value: c, child: Text(c)))
-                    .toList(),
-                onChanged: (v) => setState(() => _selectedCategory = v),
+              // Pixel-matched to the reference's pill-chip row (Welding/
+              // Plumbing/Carpentry) — light-gray fill on the selected
+              // chip, outlined on the rest, black text either way. This
+              // is a different selected-state treatment than Home's
+              // category chips (black fill/white text) since that's what
+              // this screen's own reference specifically shows.
+              FormField<String>(
+                initialValue: _selectedCategory,
                 validator: (v) =>
                     v == null ? 'Please select a service category' : null,
+                builder: (field) => Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SizedBox(
+                      height: 44,
+                      child: ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: ServiceCategories.all.length,
+                        separatorBuilder: (_, _) => const SizedBox(width: 10),
+                        itemBuilder: (ctx, i) {
+                          final c = ServiceCategories.all[i];
+                          final selected = _selectedCategory == c;
+                          return GestureDetector(
+                            onTap: () {
+                              setState(() => _selectedCategory = c);
+                              field.didChange(c);
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 18, vertical: 10),
+                              decoration: BoxDecoration(
+                                color: selected
+                                    ? context.colors.surfaceVariant
+                                    : context.colors.surface,
+                                borderRadius: BorderRadius.circular(AppRadius.full),
+                                border: Border.all(
+                                  color: selected
+                                      ? Colors.transparent
+                                      : context.colors.border,
+                                ),
+                              ),
+                              alignment: Alignment.center,
+                              child: Text(
+                                c,
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                  fontFamily: 'Inter',
+                                  color: context.colors.textPrimary,
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    if (field.hasError) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        field.errorText!,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: context.colors.error,
+                          fontFamily: 'Inter',
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
               ),
               const SizedBox(height: 24),
 
-              _SectionLabel('Describe the work needed'),
+              _SectionLabel('Describe the work needed',
+                  icon: Icons.description_outlined,
+                  complete: _descriptionController.text.trim().length >= 20),
               const SizedBox(height: 8),
               TextFormField(
                 controller: _descriptionController,
                 minLines: 4,
                 maxLines: 8,
+                onChanged: (_) => setState(() {}),
                 decoration: InputDecoration(
                   hintText:
                       'Describe the problem, size of the job, and any relevant details…',
@@ -391,7 +485,7 @@ class _ServiceRequestScreenState extends ConsumerState<ServiceRequestScreen> {
 
               Row(
                 children: [
-                  const _SectionLabel('Photos'),
+                  _SectionLabel('Photos', icon: Icons.image_outlined, complete: _images.isNotEmpty),
                   const SizedBox(width: 8),
                   Text(
                     '${_images.length}/$_maxImages',
@@ -461,7 +555,7 @@ class _ServiceRequestScreenState extends ConsumerState<ServiceRequestScreen> {
                 ),
               const SizedBox(height: 24),
 
-              _SectionLabel('Location'),
+              _SectionLabel('Location', icon: Icons.location_on_outlined),
               const SizedBox(height: 8),
               Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -520,7 +614,14 @@ class _ServiceRequestScreenState extends ConsumerState<ServiceRequestScreen> {
               ),
               const SizedBox(height: 24),
 
-              _SectionLabel('Budget (optional)'),
+              _SectionLabel('Budget (optional)', icon: Icons.payments_outlined),
+              const SizedBox(height: 4),
+              // Policy D1: shown before the job is posted, so the customer
+              // knows the smallest price that can be paid online.
+              Text(
+                'Minimum job value for secure payment: ${ref.watch(platformConfigProvider).minJobValueLabel}',
+                style: TextStyle(fontSize: 12, color: context.colors.textSecondary, fontFamily: 'Inter'),
+              ),
               const SizedBox(height: 8),
               Row(
                 children: [
@@ -595,34 +696,58 @@ class _ServiceRequestScreenState extends ConsumerState<ServiceRequestScreen> {
               ),
               const SizedBox(height: 24),
 
-              _SectionLabel('When do you need this done?'),
+              _SectionLabel('Schedule', icon: Icons.calendar_month_outlined),
               const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: _UrgencyTile(
-                      label: 'As Soon As Possible',
-                      icon: Icons.bolt_rounded,
-                      selected: _urgency == 'asap',
-                      onTap: () => setState(() {
-                        _urgency = 'asap';
-                        _scheduledDate = null;
-                      }),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _UrgencyTile(
-                      label: 'Specific Date',
-                      icon: Icons.calendar_month_outlined,
-                      selected: _urgency == 'scheduled',
-                      onTap: () async {
-                        setState(() => _urgency = 'scheduled');
-                        await _pickScheduledDate();
-                      },
-                    ),
-                  ),
+              // Dropdown-styled selector — matches the Stitch reference's
+              // "As soon as possible ⌄" single-row field. Same underlying
+              // state (_urgency/_scheduledDate) as the previous two-tile
+              // picker; only the presentation changed.
+              PopupMenuButton<String>(
+                initialValue: _urgency,
+                onSelected: (value) async {
+                  if (value == 'asap') {
+                    setState(() {
+                      _urgency = 'asap';
+                      _scheduledDate = null;
+                    });
+                  } else {
+                    setState(() => _urgency = 'scheduled');
+                    await _pickScheduledDate();
+                  }
+                },
+                itemBuilder: (context) => const [
+                  PopupMenuItem(value: 'asap', child: Text('As soon as possible')),
+                  PopupMenuItem(value: 'scheduled', child: Text('Specific date')),
                 ],
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                  decoration: BoxDecoration(
+                    color: context.colors.surfaceVariant,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        _urgency == 'asap' ? Icons.bolt_rounded : Icons.event_outlined,
+                        size: 18,
+                        color: context.colors.textSecondary,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          _urgency == 'asap' ? 'As soon as possible' : 'Specific date',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: context.colors.textPrimary,
+                            fontFamily: 'Inter',
+                          ),
+                        ),
+                      ),
+                      Icon(Icons.expand_more_rounded, size: 20, color: context.colors.textTertiary),
+                    ],
+                  ),
+                ),
               ),
               if (_urgency == 'scheduled' && _scheduledDate != null) ...[
                 const SizedBox(height: 10),
@@ -662,34 +787,20 @@ class _ServiceRequestScreenState extends ConsumerState<ServiceRequestScreen> {
               ],
               const SizedBox(height: 32),
 
-              ElevatedButton(
-                onPressed: jobState.isSubmitting ? null : _submitRequest,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: context.colors.primary,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14)),
-                ),
-                child: jobState.isSubmitting
-                    ? const SizedBox(
-                        height: 22,
-                        width: 22,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2, color: Colors.white),
-                      )
-                    : const Text(
-                        'Post Job & Find Artisans',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w700,
-                          fontFamily: 'Inter',
-                        ),
-                      ),
+              // Black "commitment" button — posting a job is a one-time,
+              // high-commitment action in the same category as Lock Funds
+              // in Escrow / Book Now, which is what Stitch's "Post Job"
+              // button uses.
+              CommitButton(
+                label: 'Post Job',
+                icon: Icons.arrow_forward_rounded,
+                loading: jobState.isSubmitting,
+                onPressed: _submitRequest,
               ),
               const SizedBox(height: 24),
             ],
           ),
+        ),
         ),
       ),
     );
@@ -796,73 +907,83 @@ class _AiSuggestionCard extends StatelessWidget {
 
 class _SectionLabel extends StatelessWidget {
   final String text;
-  const _SectionLabel(this.text);
+  final bool? complete;
+  // Leading section icon — matches the Stitch "Post a New Job" reference's
+  // icon-prefixed section headers (📋 Job Details, 🖼 Photos, 📅 Schedule,
+  // 💳 Budget). Optional so pre-existing call sites without a mapped icon
+  // are unaffected.
+  final IconData? icon;
+  const _SectionLabel(this.text, {this.complete, this.icon});
 
   @override
-  Widget build(BuildContext context) => Text(
-        text,
-        style: TextStyle(
-          fontSize: 15,
-          fontWeight: FontWeight.w700,
-          color: context.colors.textPrimary,
-          fontFamily: 'Inter',
-        ),
+  Widget build(BuildContext context) => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: 16, color: context.colors.textSecondary),
+            const SizedBox(width: 6),
+          ],
+          Text(
+            text,
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w700,
+              color: context.colors.textPrimary,
+              fontFamily: 'Inter',
+            ),
+          ),
+          if (complete == true) ...[
+            const SizedBox(width: 6),
+            Icon(Icons.check_circle_rounded, size: 15, color: context.colors.primary),
+          ],
+        ],
       );
 }
 
-class _UrgencyTile extends StatelessWidget {
-  final String label;
-  final IconData icon;
-  final bool selected;
-  final VoidCallback onTap;
-
-  const _UrgencyTile({
-    required this.label,
-    required this.icon,
-    required this.selected,
-    required this.onTap,
-  });
+/// Required-field completion at a glance — Category, Description, Photos.
+/// Purely visual; Form validators are still what actually gates submission.
+class _ProgressBar extends StatelessWidget {
+  final double fraction;
+  const _ProgressBar({required this.fraction});
 
   @override
-  Widget build(BuildContext context) => GestureDetector(
-        onTap: onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          padding:
-              const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
-          decoration: BoxDecoration(
-            color:
-                selected ? context.colors.primarySurface : context.colors.surface,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: selected ? context.colors.primary : context.colors.border,
-              width: selected ? 1.5 : 1,
-            ),
-          ),
-          child: Column(
+  Widget build(BuildContext context) => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Icon(
-                icon,
-                color: selected
-                    ? context.colors.primary
-                    : context.colors.textSecondary,
-                size: 24,
-              ),
-              const SizedBox(height: 6),
               Text(
-                label,
-                textAlign: TextAlign.center,
+                'Required details',
                 style: TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w600,
-                  color: selected
-                      ? context.colors.primary
-                      : context.colors.textSecondary,
+                  color: context.colors.textSecondary,
+                  fontFamily: 'Inter',
+                ),
+              ),
+              Text(
+                '${(fraction * 100).round()}%',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: context.colors.primary,
                   fontFamily: 'Inter',
                 ),
               ),
             ],
           ),
-        ),
+          const SizedBox(height: 6),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              value: fraction,
+              minHeight: 6,
+              backgroundColor: context.colors.surfaceVariant,
+              valueColor: AlwaysStoppedAnimation(context.colors.primary),
+            ),
+          ),
+        ],
       );
 }
+

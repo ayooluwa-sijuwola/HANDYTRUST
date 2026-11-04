@@ -102,7 +102,7 @@ class _DisputeScreenState extends ConsumerState<DisputeScreen> {
                 ElevatedButton(
                   onPressed: _submitting
                       ? null
-                      : () => _submit(job.artisanId),
+                      : () => _submit(job.artisanId, job.customerId),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: context.colors.error,
                   ),
@@ -266,7 +266,7 @@ class _DisputeScreenState extends ConsumerState<DisputeScreen> {
     setState(() => _evidenceImages.add(bytes));
   }
 
-  Future<void> _submit(String artisanId) async {
+  Future<void> _submit(String artisanId, String customerId) async {
     if (artisanId.isEmpty) {
       setState(() => _error = 'Cannot raise a dispute before an artisan is assigned.');
       return;
@@ -302,17 +302,31 @@ class _DisputeScreenState extends ConsumerState<DisputeScreen> {
         evidenceUrls.add(url);
       }
 
+      // Stage 5 (D3): either party may raise; always against the other.
+      final raisedByCustomer = uid == customerId;
       await disputeService.raiseDispute(
         disputeId: disputeId,
         jobId: widget.jobId,
-        customerId: uid,
-        artisanId: artisanId,
+        raisedBy: uid,
+        againstUserId: raisedByCustomer ? artisanId : customerId,
+        raisedByCustomer: raisedByCustomer,
         reason: fullReason,
         evidenceImageUrls: evidenceUrls,
       );
 
       if (mounted) {
-        context.go('/job/${widget.jobId}');
+        // Prefer popping back to the job detail screen that pushed this
+        // one — preserves its existing state and the rest of the
+        // navigation stack beneath it (Android system back then still
+        // walks back through wherever the user actually came from, not
+        // just "/job/:id"). go() is kept only as a fallback for the
+        // unlikely case this screen was entered with nothing to pop
+        // (e.g. a future deep link).
+        if (context.canPop()) {
+          context.pop();
+        } else {
+          context.go('/job/${widget.jobId}');
+        }
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(

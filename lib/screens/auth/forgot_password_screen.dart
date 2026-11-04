@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../providers/auth_provider.dart';
 import '../../theme/app_theme.dart';
+import '../../widgets/auth_scaffold.dart';
 
 class ForgotPasswordScreen extends ConsumerStatefulWidget {
   const ForgotPasswordScreen({super.key});
@@ -26,6 +27,11 @@ class _ForgotPasswordScreenState extends ConsumerState<ForgotPasswordScreen> {
   }
 
   Future<void> _submit() async {
+    // P0 remediation (design/P0_REMEDIATION_PLAN.md §6.2 scenario f): the
+    // "Send Reset Link" button already disables itself while _loading, but
+    // onFieldSubmitted (Enter key) below was not gated the same way,
+    // allowing a rapid double-submit that the button alone couldn't stop.
+    if (_loading) return;
     if (!_formKey.currentState!.validate()) return;
     setState(() {
       _loading = true;
@@ -33,12 +39,23 @@ class _ForgotPasswordScreenState extends ConsumerState<ForgotPasswordScreen> {
     });
 
     try {
-      await ref
+      // P0 remediation (design/P0_REMEDIATION_PLAN.md §6): sendPasswordReset
+      // now returns whether it actually succeeded — previously this screen
+      // set _sent = true unconditionally whenever the await didn't throw,
+      // which was ALWAYS the case for a FirebaseAuthException, since the
+      // notifier caught and stored it without rethrowing. The success
+      // screen must only ever render after a real, confirmed send.
+      final ok = await ref
           .read(authNotifierProvider.notifier)
           .sendPasswordReset(_emailCtrl.text.trim());
-      if (mounted) setState(() => _sent = true);
+      if (!mounted) return;
+      if (ok) {
+        setState(() => _sent = true);
+      } else {
+        setState(() => _error = ref.read(authNotifierProvider).error);
+      }
     } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
+      if (mounted) setState(() => _error = 'Something went wrong. Please try again.');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -48,58 +65,69 @@ class _ForgotPasswordScreenState extends ConsumerState<ForgotPasswordScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: context.colors.background,
-      appBar: AppBar(
-        backgroundColor: context.colors.background,
-        elevation: 0,
-        leading: IconButton(
-          icon: Icon(Icons.arrow_back_rounded,
-              color: context.colors.textPrimary),
-          onPressed: () => context.pop(),
-        ),
-      ),
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: _sent ? _successState() : _formState(),
+        child: AuthWebLayout(
+          child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.arrow_back),
+                    onPressed: () => context.pop(),
+                  ),
+                  const SizedBox(width: 4),
+                  const AuthBrandHeader(),
+                ],
+              ),
+              const SizedBox(height: 20),
+              AuthCard(
+                child: _sent ? _successState(context) : _formState(context),
+              ),
+              const AuthFooter(),
+            ],
+          ),
+        ),
         ),
       ),
     );
   }
 
-  Widget _formState() {
+  Widget _formState(BuildContext context) {
     return Form(
       key: _formKey,
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Text(
             'Reset Password',
-            style: TextStyle(
-              fontSize: 26,
-              fontWeight: FontWeight.w700,
-              color: context.colors.textPrimary,
-              fontFamily: 'Inter',
-            ),
+            textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                  fontWeight: FontWeight.w800,
+                  color: context.colors.textPrimary,
+                ),
           ),
           const SizedBox(height: 8),
           Text(
-            'Enter your email and we\'ll send a reset link.',
-            style: TextStyle(
-              fontSize: 15,
-              color: context.colors.textSecondary,
-              fontFamily: 'Inter',
-            ),
+            "Enter your email and we'll send a reset link.",
+            textAlign: TextAlign.center,
+            style: Theme.of(context)
+                .textTheme
+                .bodyMedium
+                ?.copyWith(color: context.colors.textSecondary),
           ),
-          const SizedBox(height: 32),
-          TextFormField(
+          const SizedBox(height: 28),
+
+          AuthTextField(
+            label: 'Email Address',
             controller: _emailCtrl,
+            hintText: 'name@company.com',
+            prefixIcon: Icons.email_outlined,
             keyboardType: TextInputType.emailAddress,
             textInputAction: TextInputAction.done,
             onFieldSubmitted: (_) => _submit(),
-            decoration: const InputDecoration(
-              labelText: 'Email address',
-              prefixIcon: Icon(Icons.email_outlined),
-            ),
             validator: (v) {
               if (v == null || v.trim().isEmpty) return 'Enter your email';
               if (!RegExp(r'^[\w.+\-]+@[\w\-]+\.\w+$').hasMatch(v.trim())) {
@@ -120,51 +148,31 @@ class _ForgotPasswordScreenState extends ConsumerState<ForgotPasswordScreen> {
             ),
           ],
           const SizedBox(height: 24),
-          FilledButton(
-            onPressed: _loading ? null : _submit,
-            style: FilledButton.styleFrom(
-              minimumSize: const Size(double.infinity, 52),
-              backgroundColor: context.colors.primary,
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12)),
-            ),
-            child: _loading
-                ? const SizedBox(
-                    width: 22,
-                    height: 22,
-                    child: CircularProgressIndicator(
-                        strokeWidth: 2, color: Colors.white),
-                  )
-                : const Text(
-                    'Send Reset Link',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                      fontFamily: 'Inter',
-                    ),
-                  ),
+
+          AuthButton(
+            label: 'Send Reset Link',
+            loading: _loading,
+            onPressed: _submit,
+            trailingIcon: Icons.arrow_forward_rounded,
           ),
         ],
       ),
     );
   }
 
-  Widget _successState() {
+  Widget _successState(BuildContext context) {
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        Icon(Icons.mark_email_read_outlined,
-            size: 72, color: context.colors.accent),
-        const SizedBox(height: 24),
+        Icon(Icons.mark_email_read_outlined, size: 64, color: context.colors.primary),
+        const SizedBox(height: 20),
         Text(
           'Check your inbox',
-          style: TextStyle(
-            fontSize: 22,
-            fontWeight: FontWeight.w700,
-            color: context.colors.textPrimary,
-            fontFamily: 'Inter',
-          ),
+          style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                fontWeight: FontWeight.w800,
+                color: context.colors.textPrimary,
+              ),
         ),
         const SizedBox(height: 10),
         Text(
@@ -177,23 +185,10 @@ class _ForgotPasswordScreenState extends ConsumerState<ForgotPasswordScreen> {
             height: 1.5,
           ),
         ),
-        const SizedBox(height: 32),
+        const SizedBox(height: 28),
         OutlinedButton(
           onPressed: () => context.go('/login'),
-          style: OutlinedButton.styleFrom(
-            minimumSize: const Size(200, 48),
-            side: BorderSide(color: context.colors.primary),
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          ),
-          child: Text(
-            'Back to Login',
-            style: TextStyle(
-              fontFamily: 'Inter',
-              fontWeight: FontWeight.w600,
-              color: context.colors.primary,
-            ),
-          ),
+          child: const Text('Back to Login'),
         ),
       ],
     );

@@ -5,6 +5,7 @@ import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../../core/services/storage_service.dart';
 import '../../models/verification_model.dart';
 import '../../providers/auth_provider.dart';
@@ -80,6 +81,40 @@ class _VerificationUploadScreenState
     );
   }
 
+  // Root cause of "the selfie/ID step silently does nothing" (traced from
+  // source, see the verification-flow debug summary): image_picker's
+  // pickImage() returns null both when the user genuinely cancels AND, on
+  // some OS/plugin version combinations, when the OS denies the
+  // camera/photo-library permission outright — the two are indistinguishable
+  // from the return value alone, and this screen previously treated both as
+  // "silently do nothing." Requesting the permission explicitly first (via
+  // permission_handler, already a project dependency) lets a real denial
+  // surface as a real, actionable message instead of a blank tap.
+  //
+  // Separately and more severely on iOS specifically: ios/Runner/Info.plist
+  // had NO NSCameraUsageDescription or NSPhotoLibraryUsageDescription keys
+  // at all. Without those, iOS refuses the permission request outright
+  // before any prompt is even shown — every artisan on iOS would hit this
+  // on the very first "Take Selfie" tap, which is the single highest-
+  // confidence explanation for "an artisan cannot submit verification."
+  // Fixed in Info.plist alongside this change.
+  Future<bool> _ensurePermission(Permission permission, String what) async {
+    final status = await permission.request();
+    if (status.isGranted || status.isLimited) return true;
+    if (!mounted) return false;
+    if (status.isPermanentlyDenied) {
+      showErrorSnackbar(
+        context,
+        '$what access is turned off for HandyTrust. Enable it in Settings to continue.',
+        onRetry: openAppSettings,
+        actionLabel: 'Open Settings',
+      );
+    } else {
+      showErrorSnackbar(context, '$what permission is required to continue.');
+    }
+    return false;
+  }
+
   // Both pickers previously had zero error handling and called setState()
   // without checking `mounted` — if the widget was disposed while the
   // camera/gallery intent was in flight (the camera is a separate Activity
@@ -90,6 +125,7 @@ class _VerificationUploadScreenState
     if (_processingSelfie) return;
     setState(() => _processingSelfie = true);
     try {
+      if (!await _ensurePermission(Permission.camera, 'Camera')) return;
       final picked = await _picker.pickImage(
         source: ImageSource.camera,
         preferredCameraDevice: CameraDevice.front,
@@ -111,6 +147,9 @@ class _VerificationUploadScreenState
     if (_processingId) return;
     setState(() => _processingId = true);
     try {
+      final permission = fromCamera ? Permission.camera : Permission.photos;
+      final label = fromCamera ? 'Camera' : 'Photo library';
+      if (!await _ensurePermission(permission, label)) return;
       final picked = await _picker.pickImage(
         source: fromCamera ? ImageSource.camera : ImageSource.gallery,
         imageQuality: 85,
@@ -296,7 +335,9 @@ class _VerificationUploadScreenState
             ? const Center(child: CircularProgressIndicator())
             : _existing?.status == VerificationStatus.pending
                 ? _PendingReviewView()
-                : _UploadForm(
+                : _existing?.status == VerificationStatus.approved
+                    ? const _ApprovedView()
+                    : _UploadForm(
                     selfieBytes: _selfieBytes,
                     idBytes: _idBytes,
                     uploading: _uploading,
@@ -348,6 +389,67 @@ class _PendingReviewView extends StatelessWidget {
             const SizedBox(height: 10),
             Text(
               'Your verification documents are under review. This usually takes 24–48 hours. You\'ll be notified once approved.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 14,
+                color: context.colors.textSecondary,
+                fontFamily: 'Inter',
+                height: 1.5,
+              ),
+            ),
+            const SizedBox(height: 28),
+            OutlinedButton(
+              onPressed: () => context.pop(),
+              child: const Text('Back to Dashboard'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// Previously absent: an already-approved artisan who navigated back to this
+// screen fell through to _UploadForm and could tap Submit — Firestore
+// rules only let the owner update verifications/{uid} while its status is
+// 'rejected' or 'pending_later', so an approved artisan's resubmission was
+// rejected with the generic "submission failed" message. Not the main
+// "cannot submit" failure point, but a real dead-end worth a clear
+// dedicated state instead of a confusing rules error.
+class _ApprovedView extends StatelessWidget {
+  const _ApprovedView();
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 80,
+              height: 80,
+              decoration: BoxDecoration(
+                color: context.colors.accentSurface,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(Icons.verified_rounded,
+                  size: 40, color: context.colors.accent),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              'Identity Verified',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.w700,
+                color: context.colors.textPrimary,
+                fontFamily: 'Inter',
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Your identity has already been verified. You appear with the Verified badge to customers.',
               textAlign: TextAlign.center,
               style: TextStyle(
                 fontSize: 14,

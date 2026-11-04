@@ -2,17 +2,24 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/services/matching_service.dart';
 import '../models/artisan_model.dart';
+import 'platform_config_provider.dart';
 
 final matchingServiceProvider = Provider<MatchingService>(
   (ref) => MatchingService(FirebaseFirestore.instance),
 );
 
 final matchingProvider = FutureProvider.family<List<ArtisanModel>, MatchingParams>(
-  (ref, params) => ref.read(matchingServiceProvider).findMatches(
-        category: params.category,
-        customerLat: params.lat,
-        customerLng: params.lng,
-      ),
+  (ref, params) {
+    // Stage 6 (D8): radius defaults/bounds come from trusted backend config.
+    final cfg = ref.read(platformConfigProvider);
+    return ref.read(matchingServiceProvider).findMatches(
+          category: params.category,
+          customerLat: params.lat,
+          customerLng: params.lng,
+          defaultRadiusKm: cfg.defaultServiceRadiusKm,
+          maxRadiusKm: cfg.maxServiceRadiusKm,
+        );
+  },
 );
 
 class MatchingParams {

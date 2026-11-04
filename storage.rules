@@ -14,15 +14,40 @@ service firebase.storage {
     }
 
     function isAdmin() {
-      return isSignedIn() && request.auth.token.admin == true;
+      // .get() with a default: non-admin tokens have no 'admin' claim, and a
+      // missing-property error must not be relied on to evaluate as false.
+      return isSignedIn() && request.auth.token.get('admin', false) == true;
+    }
+
+    // Stage 6 (HT-023): cross-service checks against Firestore so private
+    // job/dispute media is readable only by the people involved. A missing
+    // document makes the expression error, which denies.
+    function jobData(jobId) {
+      return firestore.get(/databases/(default)/documents/jobs/$(jobId)).data;
+    }
+    function isJobParty(jobId) {
+      return request.auth.uid == jobData(jobId).customerId ||
+             request.auth.uid == jobData(jobId).artisanId;
+    }
+    function isArtisanAccount() {
+      return firestore.exists(/databases/(default)/documents/artisans/$(request.auth.uid));
+    }
+    function isDisputeParty(disputeId) {
+      let d = firestore.get(/databases/(default)/documents/disputes/$(disputeId)).data;
+      return request.auth.uid == d.raisedBy || request.auth.uid == d.againstUserId;
     }
 
     // Job images — only the customer or artisan on that job may upload.
     // The jobId is embedded in the path; the caller must also embed their uid
     // as the first path segment so we can verify ownership:
     //   /jobs/{jobId}/{uid}/{filename}
+    // Stage 6: previously readable by any signed-in user. Now the uploader
+    // (who reads back the URL before the job doc exists), the job's parties,
+    // admins, and — while the job is open for quotes — artisan accounts.
     match /jobs/{jobId}/{uid}/{allPaths=**} {
-      allow read: if isSignedIn();
+      allow read: if isOwner(uid) || isAdmin() ||
+        (isSignedIn() && (isJobParty(jobId) ||
+          (jobData(jobId).status == 'requested' && isArtisanAccount())));
       allow write: if isOwner(uid)
         && request.resource.size < 5 * 1024 * 1024
         && request.resource.contentType.matches('image/.*');
@@ -34,6 +59,17 @@ service firebase.storage {
       allow write: if isOwner(uid)
         && request.resource.size < 5 * 1024 * 1024
         && request.resource.contentType.matches('image/.*');
+    }
+
+    // Stage 6 (HT-029): avatar path used by ProfileService.uploadAvatar /
+    // removeAvatar (profiles/{uid}/avatar.jpg) had no rule, so the default
+    // deny broke avatar upload. Same policy as users/{uid}.
+    match /profiles/{uid}/{allPaths=**} {
+      allow read: if isSignedIn();
+      allow write: if isOwner(uid)
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+      allow delete: if isOwner(uid);
     }
 
     // Artisan portfolio photos — publicly viewable like the rest of the
@@ -48,13 +84,23 @@ service firebase.storage {
     // Verification documents (selfie, government ID)
     match /verifications/{uid}/{allPaths=**} {
       allow read: if isOwner(uid) || isAdmin();
+      // contentType check added — every other upload path in this app
+      // restricts to images; this one didn't, so a non-image file under
+      // 10MB could previously be uploaded as a "selfie" or "ID". The
+      // client (StorageService.uploadVerificationPhoto) already always
+      // sets contentType: 'image/jpeg', so this matches existing behavior.
       allow write: if isOwner(uid)
-        && request.resource.size < 10 * 1024 * 1024;
+        && request.resource.size < 10 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
     }
 
     // Dispute evidence photos
+    // Stage 6 (HT-023): previously readable by any signed-in user. Now the
+    // uploader (evidence is uploaded before the dispute doc exists), the two
+    // dispute parties, and admins.
     match /disputes/{disputeId}/{uid}/{allPaths=**} {
-      allow read: if isSignedIn();
+      allow read: if isOwner(uid) || isAdmin() ||
+        (isSignedIn() && isDisputeParty(disputeId));
       allow write: if isOwner(uid)
         && request.resource.size < 5 * 1024 * 1024
         && request.resource.contentType.matches('image/.*');

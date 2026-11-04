@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/services/job_service.dart';
 import '../core/utils/safe_firestore.dart';
@@ -62,7 +63,8 @@ final jobPaymentProvider =
 class EscrowNotifier extends StateNotifier<AsyncValue<void>> {
   final JobService _job;
   final String _uid;
-
+  // Stage 6: no notification writer here any more — agreement and every
+  // other job event is notified server-side (functions/index.js).
   EscrowNotifier(this._job, this._uid) : super(const AsyncData(null));
 
   // ─── Role assignments per action ─────────────────────────────────────────
@@ -101,10 +103,12 @@ class EscrowNotifier extends StateNotifier<AsyncValue<void>> {
         () => _job.openChat(_customerCtx(JobActionType.statusTransition), jobId));
   }
 
-  Future<void> initPayment(String jobId, double amount) async {
+  /// No amount parameter (Stage 2, HT-004): the charged amount is the
+  /// agreedAmount frozen at the artisan's acceptance, read server-side.
+  Future<void> initPayment(String jobId) async {
     state = const AsyncLoading();
     state = await AsyncValue.guard(
-        () => _job.initPayment(_customerCtx(JobActionType.statusTransition), jobId, amount));
+        () => _job.initPayment(_customerCtx(JobActionType.statusTransition), jobId));
   }
 
   Future<void> lockEscrow(String jobId, String ref) async {
@@ -132,6 +136,7 @@ class EscrowNotifier extends StateNotifier<AsyncValue<void>> {
   Future<void> submitCompletion(
     String jobId, {
     required List<String> imageUrls,
+    List<String> beforePhotoUrls = const [],
     String? notes,
   }) async {
     state = const AsyncLoading();
@@ -139,6 +144,7 @@ class EscrowNotifier extends StateNotifier<AsyncValue<void>> {
           _artisanCtx(JobActionType.workSubmitted),
           jobId,
           completionImageUrls: imageUrls,
+          beforePhotoUrls: beforePhotoUrls,
           artisanNotes: notes,
         ));
   }
@@ -149,11 +155,160 @@ class EscrowNotifier extends StateNotifier<AsyncValue<void>> {
   // delegates the job half of the write to JobService.raiseDisputeWithRecord
   // / resolveDisputeWithRecord (see dispute_service.dart).
 
-  Future<void> cancelJob(String jobId, {required ActorRole callerRole}) async {
+  Future<void> proposeAppointmentSlots(
+    String jobId,
+    List<DateTime> slots,
+  ) async {
+    state = const AsyncLoading();
+    state = await AsyncValue.guard(() => _job.proposeAppointmentSlots(
+          _artisanCtx(JobActionType.statusTransition),
+          jobId,
+          slots,
+        ));
+  }
+
+  Future<void> confirmAppointmentSlot(String jobId, DateTime slot) async {
+    state = const AsyncLoading();
+    state = await AsyncValue.guard(() => _job.confirmAppointmentSlot(
+          _customerCtx(JobActionType.statusTransition),
+          jobId,
+          slot,
+        ));
+  }
+
+  // ─── Agreement confirmation (Negotiation Completed checkpoint) ───────────
+
+  /// Customer locks in the negotiated terms and hands off to the artisan
+  /// for confirmation. Fetches the job's artisanId post-write (same pattern
+  /// QuoteService.submitQuote uses to find its notification recipient) —
+  /// EscrowNotifier's other methods don't need this since they're all
+  /// already covered by the server-side push in onJobCompleted.
+  Future<void> confirmAgreement(
+    String jobId, {
+    required String scope,
+    double? price,
+  }) async {
+    state = const AsyncLoading();
+    state = await AsyncValue.guard(() async {
+      await _job.confirmAgreementAsCustomer(
+        _customerCtx(JobActionType.agreementConfirmedByCustomer),
+        jobId,
+        scope: scope,
+        price: price,
+      );
+      // Stage 6 (HT-015): this notification is generated server-side from the
+      // underlying document change (functions/index.js); clients can no longer
+      // create notifications.
+    });
+  }
+
+  /// Artisan accepts the confirmed agreement — job may now proceed to
+  /// scheduling/payment.
+  Future<void> acceptAgreement(String jobId) async {
+    state = const AsyncLoading();
+    state = await AsyncValue.guard(() async {
+      await _job.acceptAgreementAsArtisan(
+        _artisanCtx(JobActionType.agreementAcceptedByArtisan),
+        jobId,
+      );
+      // Stage 6 (HT-015): this notification is generated server-side from the
+      // underlying document change (functions/index.js); clients can no longer
+      // create notifications.
+    });
+  }
+
+  /// Artisan sends the agreement back for further negotiation.
+  Future<void> requestAgreementChanges(String jobId, {required String reason}) async {
+    state = const AsyncLoading();
+    state = await AsyncValue.guard(() async {
+      await _job.requestAgreementChanges(
+        _artisanCtx(JobActionType.agreementChangesRequested),
+        jobId,
+        reason: reason,
+      );
+      // Stage 6 (HT-015): this notification is generated server-side from the
+      // underlying document change (functions/index.js); clients can no longer
+      // create notifications.
+    });
+  }
+
+  Future<void> cancelJob(
+    String jobId, {
+    required ActorRole callerRole,
+    String? cancellationReason,
+  }) async {
     state = const AsyncLoading();
     state = await AsyncValue.guard(() => _job.cancelJob(
-          _ctxFor(callerRole, JobActionType.jobCancelled),
+          _ctxFor(callerRole, JobActionType.jobCancelled,
+              reason: cancellationReason),
           jobId,
+          cancelledBy: _uid,
+          cancellationReason: cancellationReason,
+        ));
+  }
+
+  /// Either party asks HandyTrust to cancel a funded job (policy D2). The
+  /// job keeps its status and escrow stays locked until an admin decides.
+  Future<void> requestPaidCancellation(
+    String jobId, {
+    required ActorRole callerRole,
+    required String reason,
+  }) async {
+    state = const AsyncLoading();
+    state = await AsyncValue.guard(() => _job.requestPaidCancellation(
+          _ctxFor(callerRole, JobActionType.paidCancellationRequested, reason: reason),
+          jobId,
+          reason: reason,
+        ));
+  }
+
+  // ─── Stage 5: booking confirmation, rework, withdrawal ────────────────────
+
+  /// Artisan accepts a booking request (policy D7).
+  Future<void> confirmBooking(String jobId) async {
+    state = const AsyncLoading();
+    state = await AsyncValue.guard(
+        () => _job.confirmBooking(_artisanCtx(JobActionType.statusTransition), jobId));
+  }
+
+  /// Customer's single rework request on submitted work (policy D4).
+  Future<void> requestRework(String jobId, {required String reason}) async {
+    state = const AsyncLoading();
+    state = await AsyncValue.guard(() => _job.requestRework(
+          _customerCtx(JobActionType.statusTransition, reason: reason),
+          jobId,
+          reason: reason,
+        ));
+  }
+
+  /// Artisan's single response to a rework request (policy D4).
+  Future<void> respondToRework(String jobId, {required String response}) async {
+    state = const AsyncLoading();
+    state = await AsyncValue.guard(() => _job.respondToRework(
+          _artisanCtx(JobActionType.statusTransition),
+          jobId,
+          response: response,
+        ));
+  }
+
+  /// Artisan declines a booking request or withdraws before payment
+  /// (policies D6/D7). Server-side: the job REOPENS for other artisans.
+  Future<void> withdrawFromJob(String jobId, {required String reason}) async {
+    state = const AsyncLoading();
+    state = await AsyncValue.guard(() async {
+      await FirebaseFunctions.instance
+          .httpsCallable('artisanWithdrawFromJob')
+          .call({'jobId': jobId, 'reason': reason});
+    });
+  }
+
+  /// Artisan advances the fine-grained progress stage within [JobStatus.inProgress].
+  Future<void> updateProgress(String jobId, JobProgressStage stage) async {
+    state = const AsyncLoading();
+    state = await AsyncValue.guard(() => _job.updateJobProgress(
+          _artisanCtx(JobActionType.progressUpdated),
+          jobId,
+          stage,
         ));
   }
 }
@@ -161,5 +316,23 @@ class EscrowNotifier extends StateNotifier<AsyncValue<void>> {
 final escrowNotifierProvider =
     StateNotifierProvider<EscrowNotifier, AsyncValue<void>>((ref) {
   final uid = ref.watch(authStateChangesProvider).asData?.value?.uid ?? 'unknown';
-  return EscrowNotifier(ref.watch(jobServiceProvider), uid);
+  return EscrowNotifier(
+    ref.watch(jobServiceProvider),
+    uid,
+  );
+});
+
+/// Stage 6 (P-K, policy D9): the exact job location from
+/// `jobs/{id}/private/location`. Firestore rules only let the customer,
+/// admins and the artisan who CONFIRMED the booking read it; for anyone else
+/// this stream errors (permission denied) and callers show the coarse area.
+final jobPrivateLocationProvider =
+    StreamProvider.family<Map<String, dynamic>?, String>((ref, jobId) {
+  return FirebaseFirestore.instance
+      .collection('jobs')
+      .doc(jobId)
+      .collection('private')
+      .doc('location')
+      .snapshots()
+      .map((s) => s.data());
 });

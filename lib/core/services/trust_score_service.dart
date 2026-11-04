@@ -9,6 +9,10 @@ import '../../models/artisan_model.dart';
 ///
 /// Single source of truth for the breakdown shown on TrustScoreCard — avoid
 /// re-deriving these weights anywhere else.
+///
+/// Weights (must match functions/index.js _computeTrustScore exactly):
+///   30% Completion rate, 25% Customer ratings, 20% Verification,
+///   15% Response speed, 10% Dispute history.
 abstract final class TrustScoreService {
   static const Map<String, double> verificationPoints = {
     'unverified': 0,
@@ -33,24 +37,24 @@ abstract final class TrustScoreService {
   static List<TrustComponent> breakdown(ArtisanModel artisan) {
     return [
       TrustComponent(
-        label: 'Customer Rating',
-        score: (artisan.totalRatings > 0 ? (artisan.rating / 5) * 100 : 50) * 0.40,
-        maxScore: 40,
+        label: 'Completed Jobs',
+        score: (artisan.completedJobs.clamp(0, 50) / 50) * 100 * 0.30,
+        maxScore: 30,
       ),
       TrustComponent(
-        label: 'Completed Jobs',
-        score: (artisan.completedJobs.clamp(0, 50) / 50) * 100 * 0.25,
+        label: 'Customer Rating',
+        score: (artisan.totalRatings > 0 ? (artisan.rating / 5) * 100 : 50) * 0.25,
         maxScore: 25,
       ),
       TrustComponent(
         label: 'Verification',
-        score: (verificationPoints[artisan.verificationStatus] ?? 0) * 0.15,
-        maxScore: 15,
+        score: (verificationPoints[artisan.verificationStatus] ?? 0) * 0.20,
+        maxScore: 20,
       ),
       TrustComponent(
         label: 'Response Time',
-        score: _responseTimePoints(artisan.responseTimeMinutes) * 0.10,
-        maxScore: 10,
+        score: _responseTimePoints(artisan.responseTimeMinutes) * 0.15,
+        maxScore: 15,
       ),
       TrustComponent(
         label: 'Dispute History',

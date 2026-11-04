@@ -1,5 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
+import '../../models/admin_audit_log_model.dart';
+import 'admin_audit_service.dart';
 import 'notification_service.dart';
 
 /// Single write layer for the artisan identity verification pipeline.
@@ -12,8 +14,11 @@ import 'notification_service.dart';
 class VerificationService {
   final FirebaseFirestore _db;
   final NotificationService _notifications;
+  final AdminAuditService _audit;
 
-  VerificationService(this._db) : _notifications = NotificationService(_db);
+  VerificationService(this._db)
+      : _notifications = NotificationService(_db),
+        _audit = AdminAuditService(_db);
 
   DocumentReference<Map<String, dynamic>> _verificationRef(String uid) =>
       _db.collection('verifications').doc(uid);
@@ -116,6 +121,12 @@ class VerificationService {
         body: 'Your identity has been verified. You now appear with the Verified badge.',
       ));
     });
+    await _audit.log(
+      action: AdminAction.verificationApproved,
+      adminId: reviewerId,
+      targetId: uid,
+      targetType: 'verification',
+    );
   }
 
   /// Admin rejects (or requests resubmission — same mechanism, [reason]
@@ -154,5 +165,12 @@ class VerificationService {
         body: reason,
       ));
     });
+    await _audit.log(
+      action: AdminAction.verificationRejected,
+      adminId: reviewerId,
+      targetId: uid,
+      targetType: 'verification',
+      metadata: {'reason': reason},
+    );
   }
 }

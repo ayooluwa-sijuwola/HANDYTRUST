@@ -1,90 +1,86 @@
-import 'dart:math' as math;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../models/artisan_model.dart';
+import '../utils/geo.dart';
+import 'distance_matching.dart';
 
-/// Returns up to 5 ranked artisans for a job:
-///   3 experienced (highest match score)
-///   2 rising professionals (< 10 jobs, fairness layer)
-/// Only returns artisans with approvalStatus == 'approved' AND a verified
-/// identity (verificationStatus in id_verified/trusted) — unverified
-/// artisans must not be publicly discoverable.
+/// Distance-first artisan matching for a job (Stage 6, policy D8).
+///
+/// Only approved artisans with a verified identity are ever returned
+/// (approvalStatus == 'approved' AND verificationStatus in id_verified /
+/// trusted) — the same bar firestore.rules enforce for public discovery.
+///
+/// Previously: one category-wide query capped at 100 documents, then a
+/// proximity *bonus* of at most 10% — so the nearest artisans could be cut
+/// by the cap, and distance barely affected order. Now, when the customer's
+/// location is known, candidates are fetched by geohash neighbourhood
+/// around the job (so the cap applies to nearby artisans), filtered to those
+/// whose own service radius covers the job, and ranked by distance first
+/// (see [DistanceMatching.rankArtisans]). Artisans who haven't set a
+/// service area yet are appended after nearby ones rather than hidden.
 class MatchingService {
   final FirebaseFirestore _db;
 
   MatchingService(this._db);
 
+  static const _verifiedStatuses = ['id_verified', 'trusted'];
+  static const maxResults = 8;
+
+  Query<Map<String, dynamic>> _base(String category, String verificationStatus) => _db
+      .collection('artisans')
+      .where('category', isEqualTo: category)
+      .where('isAvailable', isEqualTo: true)
+      .where('approvalStatus', isEqualTo: 'approved')
+      .where('verificationStatus', isEqualTo: verificationStatus);
+
   Future<List<ArtisanModel>> findMatches({
     required String category,
     double? customerLat,
     double? customerLng,
+    double defaultRadiusKm = 10,
+    double maxRadiusKm = 25,
   }) async {
-    final snap = await _db
-        .collection('artisans')
-        .where('category', isEqualTo: category)
-        .where('isAvailable', isEqualTo: true)
-        .where('approvalStatus', isEqualTo: 'approved')
-        .where('verificationStatus', whereIn: ['id_verified', 'trusted'])
-        .limit(100)
-        .get();
+    final candidates = <ArtisanModel>[];
+    ArtisanModel parse(QueryDocumentSnapshot<Map<String, dynamic>> d) =>
+        ArtisanModel.fromJson({...d.data(), 'uid': d.id});
 
-    final all = snap.docs
-        .map((d) => ArtisanModel.fromJson({...d.data(), 'uid': d.id}))
-        .toList();
-
-    return _rank(all, customerLat: customerLat, customerLng: customerLng);
-  }
-
-  List<ArtisanModel> _rank(
-    List<ArtisanModel> artisans, {
-    double? customerLat,
-    double? customerLng,
-  }) {
-    final experienced = <ArtisanModel>[];
-    final rising = <ArtisanModel>[];
-
-    for (final a in artisans) {
-      if (a.isRising) {
-        rising.add(a);
-      } else {
-        experienced.add(a);
+    if (customerLat != null && customerLng != null) {
+      final precision = Geo.precisionForRadius(maxRadiusKm);
+      final cells = Geo.neighbourhood(customerLat, customerLng, precision);
+      final field = precision == 4 ? 'serviceGeohash4' : 'serviceGeohash3';
+      for (final status in _verifiedStatuses) {
+        final snap = await _base(category, status).where(field, whereIn: cells).limit(100).get();
+        candidates.addAll(snap.docs.map(parse));
       }
     }
 
-    experienced.sort((a, b) => _score(b, customerLat, customerLng)
-        .compareTo(_score(a, customerLat, customerLng)));
-    rising.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    var ranked = DistanceMatching.rankArtisans(
+      candidates,
+      jobLat: customerLat,
+      jobLng: customerLng,
+      defaultRadiusKm: defaultRadiusKm,
+    );
 
-    final result = <ArtisanModel>[
-      ...experienced.take(3),
-      ...rising.take(2),
-    ];
-
-    final seen = <String>{};
-    return result.where((a) => seen.add(a.uid)).toList();
-  }
-
-  double _score(ArtisanModel a, double? lat, double? lng) {
-    var score = a.matchScore;
-
-    if (lat != null && lng != null && a.latitude != null && a.longitude != null) {
-      final distKm = _haversineKm(lat, lng, a.latitude!, a.longitude!);
-      final proximityBonus = (1.0 - (distKm / 50.0).clamp(0.0, 1.0)) * 0.10;
-      score += proximityBonus;
+    // Fallback so existing artisans without a service area (and jobs without
+    // a customer location) still get results.
+    if (ranked.length < maxResults) {
+      final fallback = <ArtisanModel>[];
+      for (final status in _verifiedStatuses) {
+        final snap = await _base(category, status).limit(50).get();
+        fallback.addAll(snap.docs.map(parse).where((a) =>
+            customerLat == null || a.latitude == null || a.longitude == null));
+      }
+      final have = ranked.map((e) => e.$1.uid).toSet();
+      ranked = [
+        ...ranked,
+        ...DistanceMatching.rankArtisans(
+          fallback.where((a) => !have.contains(a.uid)).toList(),
+          jobLat: null,
+          jobLng: null,
+          defaultRadiusKm: defaultRadiusKm,
+        ),
+      ];
     }
 
-    return score.clamp(0.0, 1.1);
+    return ranked.take(maxResults).map((e) => e.$1).toList();
   }
-
-  double _haversineKm(double lat1, double lon1, double lat2, double lon2) {
-    const r = 6371.0;
-    final dLat = _rad(lat2 - lat1);
-    final dLon = _rad(lon2 - lon1);
-    final a = math.pow(math.sin(dLat / 2), 2) +
-        math.cos(_rad(lat1)) *
-            math.cos(_rad(lat2)) *
-            math.pow(math.sin(dLon / 2), 2);
-    return r * 2 * math.asin(math.sqrt(a.clamp(0.0, 1.0)));
-  }
-
-  double _rad(double deg) => deg * math.pi / 180;
 }

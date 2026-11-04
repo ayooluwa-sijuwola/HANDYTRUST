@@ -54,5 +54,6 @@ class JobStatusBadge extends StatelessWidget {
         JobStatus.disputed => context.colors.statusDisputed,
         JobStatus.resolved => context.colors.statusResolved,
         JobStatus.cancelled => context.colors.statusResolved,
+        JobStatus.expired => context.colors.textTertiary,
       };
 }

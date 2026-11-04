@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -105,81 +106,106 @@ class _DemoEscrowScreenState extends ConsumerState<DemoEscrowScreen>
 
   @override
   Widget build(BuildContext context) {
+    // Defense in depth: payment_screen.dart only navigates here in debug
+    // builds, but GoRouter would still resolve a direct/deep link to this
+    // path in a release build. A simulated escrow payment must never be
+    // reachable in release — that would let a job appear "paid" with no
+    // real money having moved.
+    if (!kDebugMode) {
+      return Scaffold(
+        backgroundColor: context.colors.background,
+        appBar: AppBar(title: const Text('Payment')),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Text(
+              'This payment method is not available.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: context.colors.textSecondary),
+            ),
+          ),
+        ),
+      );
+    }
+
     final paymentState = ref.watch(demoPaymentNotifierProvider(widget.jobId));
 
     // Play animation when notifier reaches success
-    ref.listen<DemoPaymentState>(
-      demoPaymentNotifierProvider(widget.jobId),
-      (prev, next) {
-        if (next.step == DemoPaymentStep.success &&
-            prev?.step != DemoPaymentStep.success) {
-          _playSuccessAnimation();
-        }
-      },
-    );
+    ref.listen<DemoPaymentState>(demoPaymentNotifierProvider(widget.jobId), (
+      prev,
+      next,
+    ) {
+      if (next.step == DemoPaymentStep.success &&
+          prev?.step != DemoPaymentStep.success) {
+        _playSuccessAnimation();
+      }
+    });
 
-    return Scaffold(
-      backgroundColor: context.colors.background,
-      appBar: AppBar(
-        title: const Text('Secure Escrow Payment'),
-        // Prevent back-navigation while payment is processing
-        automaticallyImplyLeading:
-            paymentState.step != DemoPaymentStep.processing,
-      ),
-      body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-        // Real-time Firestore stream — no manual refresh required
-        stream: FirebaseFirestore.instance
-            .collection('jobs')
-            .doc(widget.jobId)
-            .snapshots(),
-        builder: (context, snapshot) {
-          // Safe field extraction — handles missing/null sub-maps gracefully
-          final data = snapshot.data?.data() ?? <String, dynamic>{};
-          final escrow =
-              (data['escrow'] as Map<String, dynamic>?) ?? {};
-          final payment =
-              (data['payment'] as Map<String, dynamic>?) ?? {};
+    return PopScope(
+      // The AppBar's back arrow was already hidden during processing
+      // (below) but Android's hardware/gesture back button was not —
+      // it could still pop the screen mid-payment. This closes that
+      // inconsistency: both the visual affordance and the actual system
+      // back gesture are disabled together, only while processing.
+      canPop: paymentState.step != DemoPaymentStep.processing,
+      child: Scaffold(
+        backgroundColor: context.colors.background,
+        appBar: AppBar(
+          title: const Text('Secure Escrow Payment'),
+          // Prevent back-navigation while payment is processing
+          automaticallyImplyLeading:
+              paymentState.step != DemoPaymentStep.processing,
+        ),
+        body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          // Real-time Firestore stream — no manual refresh required
+          stream: FirebaseFirestore.instance
+              .collection('jobs')
+              .doc(widget.jobId)
+              .snapshots(),
+          builder: (context, snapshot) {
+            // Safe field extraction — handles missing/null sub-maps gracefully
+            final data = snapshot.data?.data() ?? <String, dynamic>{};
+            final escrow = (data['escrow'] as Map<String, dynamic>?) ?? {};
+            final payment = (data['payment'] as Map<String, dynamic>?) ?? {};
 
-          final escrowStatus = escrow['status'] as String?;
-          final paymentRef = payment['reference'] as String?;
-          final agreedAmount = (data['agreedAmount'] as num?)?.toDouble();
+            final escrowStatus = escrow['status'] as String?;
+            final paymentRef = payment['reference'] as String?;
+            final agreedAmount = (data['agreedAmount'] as num?)?.toDouble();
 
-          // Derive display state — Firestore is authoritative; local state
-          // provides immediate response before Firestore round-trip completes.
-          final firestoreSuccess = escrowStatus == 'success';
-          final firestoreProcessing = escrowStatus == 'processing';
-          final localProcessing =
-              paymentState.step == DemoPaymentStep.processing;
-          final localSuccess = paymentState.step == DemoPaymentStep.success;
+            // Derive display state — Firestore is authoritative; local state
+            // provides immediate response before Firestore round-trip completes.
+            final firestoreSuccess = escrowStatus == 'success';
+            final firestoreProcessing = escrowStatus == 'processing';
+            final localProcessing =
+                paymentState.step == DemoPaymentStep.processing;
+            final localSuccess = paymentState.step == DemoPaymentStep.success;
 
-          if (firestoreSuccess || localSuccess) {
-            _playSuccessAnimation(); // ensure animation runs if reopened
-            return _SuccessView(
-              jobId: widget.jobId,
-              reference: paymentRef,
-              checkScale: _checkScale,
-              checkOpacity: _checkOpacity,
-            );
-          }
+            if (firestoreSuccess || localSuccess) {
+              _playSuccessAnimation(); // ensure animation runs if reopened
+              return _SuccessView(
+                jobId: widget.jobId,
+                reference: paymentRef,
+                checkScale: _checkScale,
+                checkOpacity: _checkOpacity,
+              );
+            }
 
-          if (firestoreProcessing || localProcessing) {
-            return const _ProcessingView();
-          }
+            if (firestoreProcessing || localProcessing) {
+              return const _ProcessingView();
+            }
 
-          if (paymentState.step == DemoPaymentStep.error) {
-            return _ErrorView(
-              message: paymentState.error ?? 'An unexpected error occurred.',
-              onRetry: () => ref
-                  .read(demoPaymentNotifierProvider(widget.jobId).notifier)
-                  .reset(),
-            );
-          }
+            if (paymentState.step == DemoPaymentStep.error) {
+              return _ErrorView(
+                message: paymentState.error ?? 'An unexpected error occurred.',
+                onRetry: () => ref
+                    .read(demoPaymentNotifierProvider(widget.jobId).notifier)
+                    .reset(),
+              );
+            }
 
-          return _IdleView(
-            agreedAmount: agreedAmount,
-            onPay: _startPayment,
-          );
-        },
+            return _IdleView(agreedAmount: agreedAmount, onPay: _startPayment);
+          },
+        ),
       ),
     );
   }
@@ -446,16 +472,18 @@ class _SuccessView extends StatelessWidget {
           // Transaction reference card
           if (reference != null) ...[
             Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
               decoration: BoxDecoration(
                 color: context.colors.surfaceVariant,
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Row(
                 children: [
-                  Icon(Icons.receipt_long_outlined,
-                      size: 18, color: context.colors.textSecondary),
+                  Icon(
+                    Icons.receipt_long_outlined,
+                    size: 18,
+                    color: context.colors.textSecondary,
+                  ),
                   const SizedBox(width: 12),
                   Expanded(
                     child: Column(
@@ -501,8 +529,11 @@ class _SuccessView extends StatelessWidget {
             ),
             child: Row(
               children: [
-                Icon(Icons.lock_rounded,
-                    color: context.colors.accent, size: 20),
+                Icon(
+                  Icons.lock_rounded,
+                  color: context.colors.accent,
+                  size: 20,
+                ),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(
@@ -562,8 +593,11 @@ class _ErrorView extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.error_outline_rounded,
-                size: 64, color: context.colors.error),
+            Icon(
+              Icons.error_outline_rounded,
+              size: 64,
+              color: context.colors.error,
+            ),
             const SizedBox(height: 16),
             Text(
               'Payment Failed',
@@ -597,7 +631,10 @@ class _ErrorView extends StatelessWidget {
               ),
               child: const Text(
                 'Try Again',
-                style: TextStyle(fontFamily: 'Inter', fontWeight: FontWeight.w600),
+                style: TextStyle(
+                  fontFamily: 'Inter',
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
           ],
@@ -704,35 +741,47 @@ class _AmountCard extends StatelessWidget {
             padding: EdgeInsets.symmetric(vertical: 10),
             child: Divider(height: 1),
           ),
-          _row(context, 'Total charged', '₦${total.toStringAsFixed(0)}', bold: true),
+          _row(
+            context,
+            'Total charged',
+            '₦${total.toStringAsFixed(0)}',
+            bold: true,
+          ),
         ],
       ),
     );
   }
 
-  Widget _row(BuildContext context, String label, String value, {bool bold = false}) => Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 13,
-              color: bold ? context.colors.textPrimary : context.colors.textSecondary,
-              fontFamily: 'Inter',
-              fontWeight: bold ? FontWeight.w600 : FontWeight.normal,
-            ),
-          ),
-          Text(
-            value,
-            style: TextStyle(
-              fontSize: 13,
-              fontFamily: 'Inter',
-              fontWeight: bold ? FontWeight.w700 : FontWeight.w500,
-              color: context.colors.textPrimary,
-            ),
-          ),
-        ],
-      );
+  Widget _row(
+    BuildContext context,
+    String label,
+    String value, {
+    bool bold = false,
+  }) => Row(
+    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    children: [
+      Text(
+        label,
+        style: TextStyle(
+          fontSize: 13,
+          color: bold
+              ? context.colors.textPrimary
+              : context.colors.textSecondary,
+          fontFamily: 'Inter',
+          fontWeight: bold ? FontWeight.w600 : FontWeight.normal,
+        ),
+      ),
+      Text(
+        value,
+        style: TextStyle(
+          fontSize: 13,
+          fontFamily: 'Inter',
+          fontWeight: bold ? FontWeight.w700 : FontWeight.w500,
+          color: context.colors.textPrimary,
+        ),
+      ),
+    ],
+  );
 }
 
 class _SecurityChip extends StatelessWidget {
@@ -748,8 +797,11 @@ class _SecurityChip extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.verified_user_outlined,
-                size: 14, color: context.colors.textSecondary),
+            Icon(
+              Icons.verified_user_outlined,
+              size: 14,
+              color: context.colors.textSecondary,
+            ),
             SizedBox(width: 6),
             Text(
               '256-bit Encryption  ·  Zero-fee Escrow',

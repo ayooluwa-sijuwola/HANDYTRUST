@@ -6,7 +6,6 @@ import '../../models/job_model.dart';
 import '../../models/review_model.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/escrow_provider.dart';
-import '../../providers/notification_provider.dart';
 import '../../providers/review_provider.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/review_tile.dart';
@@ -225,16 +224,19 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
       );
       await ref2.set(review.toJson());
 
-      // Recalculate artisan rating atomically
-      await _updateArtisanRating(db, artisanId);
+      // Artisan rating/totalRatings/trustScore aggregation is now handled
+      // server-side by the onReviewCreated Cloud Function (functions/index.js),
+      // triggered by the write above. This used to be attempted here as a
+      // direct client transaction, but the writer (this customer) can never
+      // be the artisan document's own owner, so firestore.rules rejected it
+      // on every attempt — the review saved, but the artisan's rating never
+      // moved, for any review, ever (see design/V2_IOS_SAFARI_RELIABILITY_REPORT.md
+      // §9). Aggregation must not live on an untrusted client; removed here,
+      // not weakened into "try anyway."
 
-      await ref.read(notificationServiceProvider).send(
-            userId: artisanId,
-            type: 'review_received',
-            title: 'New review received',
-            body: '$_rating-star review on a completed job.',
-            jobId: widget.jobId,
-          );
+      // Stage 6 (HT-015): this notification is generated server-side from the
+      // underlying document change (functions/index.js); clients can no longer
+      // create notifications.
 
       if (mounted) context.go('/home');
     } catch (e) {
@@ -244,23 +246,4 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     }
   }
 
-  Future<void> _updateArtisanRating(
-      FirebaseFirestore db, String artisanId) async {
-    try {
-      final artisanRef = db.collection('artisans').doc(artisanId);
-      await db.runTransaction((tx) async {
-        final snap = await tx.get(artisanRef);
-        final oldRating = (snap.data()?['rating'] as num?)?.toDouble() ?? 0.0;
-        final oldCount = (snap.data()?['totalRatings'] as num?)?.toInt() ?? 0;
-        final newCount = oldCount + 1;
-        final newRating = ((oldRating * oldCount) + _rating) / newCount;
-        tx.update(artisanRef, {
-          'rating': double.parse(newRating.toStringAsFixed(2)),
-          'totalRatings': newCount,
-        });
-      });
-    } catch (_) {
-      // Non-fatal: artisan stat update handled by Cloud Function in production
-    }
-  }
 }

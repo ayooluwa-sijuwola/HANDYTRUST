@@ -1,5 +1,7 @@
 import 'dart:typed_data';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import '../../models/portfolio_project_model.dart';
+import '../utils/safe_firestore.dart';
 import 'storage_service.dart';
 
 /// Single write layer for artisan portfolio data (`artisans.portfolioImageUrls`)
@@ -69,4 +71,70 @@ class PortfolioService {
       .doc(artisanId)
       .snapshots()
       .map((doc) => (doc.data()?['viewCount'] as num?)?.toInt() ?? 0);
+
+  /// Upload an image to Storage and return its download URL without touching
+  /// the artisan doc's portfolioImageUrls. Used by [PortfolioProjectScreen]
+  /// which manages image lists on the project document instead.
+  Future<String> addImageAndGetUrl({
+    required String artisanId,
+    required Uint8List bytes,
+  }) =>
+      _storage.uploadPortfolioImage(
+        artisanId: artisanId,
+        index: DateTime.now().millisecondsSinceEpoch,
+        bytes: bytes,
+      );
+
+  // ─── Portfolio Projects ───────────────────────────────────────────────────
+
+  CollectionReference<Map<String, dynamic>> get _projects =>
+      _db.collection('portfolio_projects');
+
+  Future<void> createProject({
+    required String artisanId,
+    required String title,
+    required String description,
+    required String category,
+    List<String> imageUrls = const [],
+  }) async {
+    final ref = _projects.doc();
+    await ref.set({
+      'id': ref.id,
+      'artisanId': artisanId,
+      'title': title,
+      'description': description,
+      'category': category,
+      'imageUrls': imageUrls,
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Future<void> updateProject({
+    required String projectId,
+    String? title,
+    String? description,
+    String? category,
+    List<String>? imageUrls,
+  }) async {
+    final updates = <String, dynamic>{
+      'title': ?title,
+      'description': ?description,
+      'category': ?category,
+      'imageUrls': ?imageUrls,
+    };
+    if (updates.isEmpty) return;
+    await _projects.doc(projectId).update(updates);
+  }
+
+  Future<void> deleteProject(String projectId) =>
+      _projects.doc(projectId).delete();
+
+  Stream<List<PortfolioProjectModel>> watchProjects(String artisanId) =>
+      safeStream(
+        _projects
+            .where('artisanId', isEqualTo: artisanId)
+            .orderBy('createdAt', descending: true),
+        (d) => PortfolioProjectModel.fromJson({...d.data(), 'id': d.id}),
+        debugLabel: 'portfolioProjects:$artisanId',
+      );
 }

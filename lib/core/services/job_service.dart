@@ -38,13 +38,17 @@ class JobService {
     JobStatus.matched: {JobStatus.inChat, JobStatus.cancelled},
     JobStatus.inChat: {JobStatus.paymentPending, JobStatus.cancelled},
     JobStatus.paymentPending: {JobStatus.escrowLocked, JobStatus.cancelled},
+    // escrowLocked → cancelled removed (Stage 2, policy D2): a funded job is
+    // never cancelled by a party — see requestPaidCancellation. Admin
+    // settlement goes through adminForceStatus, which bypasses this table.
     JobStatus.escrowLocked: {
       JobStatus.inProgress,
       JobStatus.disputed,
-      JobStatus.cancelled,
     },
     JobStatus.inProgress: {JobStatus.submitted, JobStatus.disputed},
-    JobStatus.submitted: {JobStatus.completed, JobStatus.disputed},
+    // Stage 5 (D4): submitted -> inProgress is the single customer rework
+    // request (requestRework); the artisan then resubmits normally.
+    JobStatus.submitted: {JobStatus.completed, JobStatus.disputed, JobStatus.inProgress},
     JobStatus.completed: {},
     JobStatus.disputed: {JobStatus.resolved},
     JobStatus.resolved: {},
@@ -60,6 +64,83 @@ class JobService {
     if (!isValidTransition(from, to)) {
       throw InvalidJobTransitionException(from: from, to: to);
     }
+  }
+
+  // ─── Agreement-confirmation validation (pure — unit-testable) ─────────────
+  //
+  // These mirror isValidTransition's role for the core state machine: pure
+  // functions of (job, actor) with no Firestore dependency, called by both
+  // the real transactional methods below AND test/job_service_agreement_test.dart.
+  // The transactional methods reconstruct a JobModel from the in-transaction
+  // read and call these directly — there is exactly one place this logic
+  // lives, not a copy for tests and a copy for production.
+
+  /// Customer may confirm the agreement only while inChat, only once a
+  /// quote has actually been accepted (artisanId set), only as the job's
+  /// own customer, and only when not already pending/confirmed.
+  static bool canConfirmAgreement(JobModel job, String actorId) {
+    if (job.status != JobStatus.inChat) return false;
+    if (job.artisanId.isEmpty) return false;
+    if (actorId != job.customerId) return false;
+    final current = job.agreementStatus ?? AgreementStatus.negotiating;
+    return current == AgreementStatus.negotiating ||
+        current == AgreementStatus.changesRequested;
+  }
+
+  /// Artisan may accept (or request changes on) the agreement only while
+  /// inChat, only as the job's own matched artisan (not any other artisan —
+  /// "not selected for" is exactly artisanId mismatch), and only once the
+  /// customer has actually confirmed and it's awaiting artisan action.
+  static bool canRespondToAgreement(JobModel job, String actorId) {
+    if (job.status != JobStatus.inChat) return false;
+    if (job.artisanId.isEmpty || actorId != job.artisanId) return false;
+    return job.agreementStatus == AgreementStatus.pendingArtisanConfirmation;
+  }
+
+  /// Stage 5 (D7): only the matched artisan confirms a booking request,
+  /// only while it is still awaiting them. The confirmation deadline itself
+  /// (default 24 h) is server-enforced in firestore.rules.
+  static bool canConfirmBooking(JobModel job, String actorId) =>
+      job.awaitingArtisanConfirmation && job.artisanId.isNotEmpty && actorId == job.artisanId;
+
+  /// Stage 5 (D4): one rework request per job, by the customer, on
+  /// submitted work. Mirrors the firestore.rules clause.
+  static bool canRequestRework(JobModel job, String actorId) =>
+      job.canRequestRework && actorId == job.customerId;
+
+  /// Stage 5 (D4): the artisan may answer the rework request once.
+  static bool canRespondToRework(JobModel job, String actorId) =>
+      job.status == JobStatus.inProgress &&
+      job.reworkCount == 1 &&
+      job.reworkResponse == null &&
+      job.artisanId.isNotEmpty &&
+      actorId == job.artisanId;
+
+  /// Paid-job cancellation request (policy D2): once escrow is funded,
+  /// neither party may cancel — either may ask, once at a time, while the
+  /// job is escrowLocked or inProgress. Mirrors the firestore.rules clause.
+  /// (submitted is excluded deliberately — a problem with submitted work
+  /// goes through the dispute flow, which also pauses auto-release.)
+  static bool canRequestPaidCancellation(JobModel job, String actorId) {
+    if (job.status != JobStatus.escrowLocked && job.status != JobStatus.inProgress) {
+      return false;
+    }
+    final isParty = actorId == job.customerId ||
+        (job.artisanId.isNotEmpty && actorId == job.artisanId);
+    return isParty && !job.hasPendingCancellationRequest;
+  }
+
+  /// Payment may only be initiated once both parties have confirmed the
+  /// agreement AND (for jobs that need one) a schedule is confirmed — on
+  /// top of (not instead of) the underlying inChat → paymentPending
+  /// transition already being structurally valid. 'asap' jobs have nothing
+  /// to schedule, so [JobModel.schedulingSatisfied] is true for them by
+  /// definition — this does not add a new blocker for the common case.
+  static bool canInitPayment(JobModel job, String actorId) {
+    if (!isValidTransition(job.status, JobStatus.paymentPending)) return false;
+    if (actorId != job.customerId) return false;
+    if (job.agreementStatus != AgreementStatus.confirmed) return false;
+    return job.schedulingSatisfied;
   }
 
   // ─── Core write primitive ─────────────────────────────────────────────────
@@ -91,7 +172,7 @@ class JobService {
       if (!skipTransitionCheck) assertValidTransition(from, to);
 
       final version = (data['updateVersion'] as int?) ?? 0;
-      final milestones = _timestampsForStatus(to);
+      final milestones = timestampsForStatus(to);
       final consistency = _consistencyFields(ctx: ctx, currentVersion: version);
       final userDelta = _sanitizeDelta({
         'status': to.name,
@@ -154,6 +235,49 @@ class JobService {
         jobStatusAfter: null, // no status change
         versionBefore: version,
         delta: {'agreedAmount': amount},
+      ));
+    });
+  }
+
+  /// Atomically updates the artisan's [progressStage] without changing job status.
+  /// Only valid when status == inProgress. The artisan may only advance the stage
+  /// (not rewind it), but this is enforced at the UI layer — here we just persist.
+  Future<void> updateJobProgress(
+    JobMutationContext ctx,
+    String jobId,
+    JobProgressStage stage,
+  ) async {
+    final jobRef = _jobRef(jobId);
+    final auditRef = _auditRef(jobId);
+
+    await _db.runTransaction((tx) async {
+      final snap = await tx.get(jobRef);
+      if (!snap.exists) throw JobNotFoundException(jobId);
+
+      final data = snap.data()!;
+      final status = JobStatus.fromString(data['status'] as String? ?? 'requested');
+      if (status != JobStatus.inProgress) {
+        throw JobStateConflictException(
+          'Progress stage can only be updated while job is inProgress (current: "${status.name}").',
+        );
+      }
+
+      final version = (data['updateVersion'] as int?) ?? 0;
+
+      tx.update(jobRef, {
+        'progressStage': stage.name,
+        'progressUpdatedAt': FieldValue.serverTimestamp(),
+        ..._consistencyFields(ctx: ctx, currentVersion: version),
+      });
+
+      tx.set(auditRef, _buildAuditEntry(
+        id: auditRef.id,
+        ctx: ctx,
+        jobId: jobId,
+        jobStatusBefore: status.name,
+        jobStatusAfter: null,
+        versionBefore: version,
+        delta: {'progressStage': stage.name},
       ));
     });
   }
@@ -223,9 +347,20 @@ class JobService {
   /// [confirmComplete] is a special-case because it writes to TWO top-level
   /// collections (job + escrow_releases) AND the audit log — all in one
   /// transaction. If any write fails, all three roll back.
+  ///
+  /// Payout idempotency (design/PAYOUT_RACE_CONDITION_AUDIT.md): the release
+  /// document ID is the [jobId] itself, not an auto-generated ID — one job
+  /// can structurally have at most one `escrow_releases` document, ever.
+  /// This transaction reads that fixed-ID doc and aborts with
+  /// [JobStateConflictException] if it already exists, so a customer
+  /// manually confirming a job the auto-release Cloud Function has already
+  /// (or concurrently is about to) release cannot create a second payout —
+  /// whichever writer's transaction reaches the release doc first wins;
+  /// Firestore's transaction-conflict retry makes this safe under real
+  /// concurrency, not just under sequential calls.
   Future<void> confirmComplete(JobMutationContext ctx, String jobId) async {
     final jobRef = _jobRef(jobId);
-    final releaseRef = _db.collection('escrow_releases').doc();
+    final releaseRef = _db.collection('escrow_releases').doc(jobId);
     final auditRef = _auditRef(jobId);
 
     await _db.runTransaction((tx) async {
@@ -235,6 +370,13 @@ class JobService {
       final data = snap.data()!;
       final from = JobStatus.fromString(data['status'] as String? ?? 'requested');
       assertValidTransition(from, JobStatus.completed);
+
+      final releaseSnap = await tx.get(releaseRef);
+      if (releaseSnap.exists) {
+        throw const JobStateConflictException(
+          'This job has already been released for payout — cannot release it a second time.',
+        );
+      }
 
       final version = (data['updateVersion'] as int?) ?? 0;
       final now = FieldValue.serverTimestamp();
@@ -246,7 +388,9 @@ class JobService {
       });
 
       // Escrow release queued atomically — job cannot reach 'completed'
-      // without a corresponding release entry.
+      // without a corresponding release entry. releaseRef's fixed jobId-
+      // keyed ID (not an auto-ID) is what makes this a true create-once,
+      // not just a same-transaction convenience.
       tx.set(releaseRef, {
         'jobId': jobId,
         'requestedAt': now,
@@ -317,18 +461,60 @@ class JobService {
     String artisanId,
   ) =>
       updateJobStatus(ctx, jobId, JobStatus.matched,
-          extra: {'artisanId': artisanId});
+          extra: {'artisanId': artisanId, 'bookingStatus': 'awaitingArtisan'});
 
   Future<void> openChat(JobMutationContext ctx, String jobId) =>
       updateJobStatus(ctx, jobId, JobStatus.inChat);
 
+  /// Own transaction rather than a thin [updateJobStatus] delegate — like
+  /// [updateAgreedAmount], this transition carries a business-rule
+  /// precondition ([canInitPayment]'s agreementStatus check) beyond pure
+  /// status-transition validity, so it needs the job data loaded first.
+  ///
+  /// Stage 2 (HT-004): no longer writes agreedAmount. The price is frozen
+  /// when the artisan accepts the agreement, and firestore.rules reject any
+  /// change to it on this transition; initializePaystackTransaction charges
+  /// the stored value. There is deliberately no amount parameter.
   Future<void> initPayment(
     JobMutationContext ctx,
     String jobId,
-    double amount,
-  ) =>
-      updateJobStatus(ctx, jobId, JobStatus.paymentPending,
-          extra: {'agreedAmount': amount});
+  ) async {
+    final jobRef = _jobRef(jobId);
+    final auditRef = _auditRef(jobId);
+
+    await _db.runTransaction((tx) async {
+      final snap = await tx.get(jobRef);
+      if (!snap.exists) throw JobNotFoundException(jobId);
+
+      final job = JobModel.fromJson({...snap.data()!, 'id': jobId});
+      assertValidTransition(job.status, JobStatus.paymentPending);
+      if (!canInitPayment(job, ctx.actorId)) {
+        final reason = job.agreementStatus != AgreementStatus.confirmed
+            ? 'a confirmed agreement (current: '
+                '"${(job.agreementStatus ?? AgreementStatus.negotiating).name}")'
+            : 'a confirmed schedule (current: '
+                '"${(job.schedulingStatus ?? SchedulingStatus.awaitingSchedule).name}")';
+        throw JobStateConflictException('Payment requires $reason.');
+      }
+
+      final version = job.updateVersion;
+
+      tx.update(jobRef, {
+        'status': JobStatus.paymentPending.name,
+        ..._consistencyFields(ctx: ctx, currentVersion: version),
+      });
+
+      tx.set(auditRef, _buildAuditEntry(
+        id: auditRef.id,
+        ctx: ctx,
+        jobId: jobId,
+        jobStatusBefore: job.status.name,
+        jobStatusAfter: JobStatus.paymentPending.name,
+        versionBefore: version,
+        delta: {'agreedAmount': job.agreedAmount},
+      ));
+    });
+  }
 
   Future<void> lockEscrow(
     JobMutationContext ctx,
@@ -345,17 +531,436 @@ class JobService {
     JobMutationContext ctx,
     String jobId, {
     required List<String> completionImageUrls,
+    List<String> beforePhotoUrls = const [],
     String? artisanNotes,
   }) {
     final extra = <String, dynamic>{
       'completionImageUrls': completionImageUrls,
+      if (beforePhotoUrls.isNotEmpty) 'beforePhotoUrls': beforePhotoUrls,
     };
     if (artisanNotes != null) extra['artisanNotes'] = artisanNotes;
     return updateJobStatus(ctx, jobId, JobStatus.submitted, extra: extra);
   }
 
-  Future<void> cancelJob(JobMutationContext ctx, String jobId) =>
-      updateJobStatus(ctx, jobId, JobStatus.cancelled);
+  /// Artisan proposes appointment slots (up to 3) while job is inChat.
+  /// No status transition — writes [appointmentSlots] + consistency fields.
+  Future<void> proposeAppointmentSlots(
+    JobMutationContext ctx,
+    String jobId,
+    List<DateTime> slots,
+  ) async {
+    final jobRef = _jobRef(jobId);
+    final auditRef = _auditRef(jobId);
+
+    await _db.runTransaction((tx) async {
+      final snap = await tx.get(jobRef);
+      if (!snap.exists) throw JobNotFoundException(jobId);
+
+      final data = snap.data()!;
+      final status = JobStatus.fromString(data['status'] as String? ?? 'requested');
+      if (status != JobStatus.inChat) {
+        throw JobStateConflictException(
+          'Appointment slots can only be proposed while job is inChat (current: "${status.name}").',
+        );
+      }
+
+      final version = (data['updateVersion'] as int?) ?? 0;
+
+      tx.update(jobRef, {
+        'appointmentSlots': slots.map((d) => Timestamp.fromDate(d)).toList(),
+        ..._consistencyFields(ctx: ctx, currentVersion: version),
+      });
+
+      tx.set(auditRef, _buildAuditEntry(
+        id: auditRef.id,
+        ctx: ctx,
+        jobId: jobId,
+        jobStatusBefore: status.name,
+        jobStatusAfter: null,
+        versionBefore: version,
+        delta: {'appointmentSlotsCount': slots.length},
+      ));
+    });
+  }
+
+  /// Customer confirms one of the artisan's proposed appointment slots.
+  /// No status transition — writes [confirmedAppointment] + consistency fields.
+  Future<void> confirmAppointmentSlot(
+    JobMutationContext ctx,
+    String jobId,
+    DateTime slot,
+  ) async {
+    final jobRef = _jobRef(jobId);
+    final auditRef = _auditRef(jobId);
+
+    await _db.runTransaction((tx) async {
+      final snap = await tx.get(jobRef);
+      if (!snap.exists) throw JobNotFoundException(jobId);
+
+      final data = snap.data()!;
+      final status = JobStatus.fromString(data['status'] as String? ?? 'requested');
+      if (status != JobStatus.inChat) {
+        throw JobStateConflictException(
+          'Appointment slot can only be confirmed while job is inChat (current: "${status.name}").',
+        );
+      }
+
+      final version = (data['updateVersion'] as int?) ?? 0;
+
+      // Confirming a slot IS the "Scheduled" workflow stage completing —
+      // written in the same transaction as confirmedAppointment itself,
+      // not a separate write, so the two can never disagree. Doesn't
+      // require agreementStatus == confirmed first: negotiating timing
+      // alongside price during inChat is normal and stays allowed: the
+      // payment gate (canInitPayment) is what actually enforces the
+      // Agreement Confirmed -> Scheduled -> Payment ordering, not this.
+      tx.update(jobRef, {
+        'confirmedAppointment': Timestamp.fromDate(slot),
+        'schedulingStatus': SchedulingStatus.scheduled.name,
+        'schedulingUpdatedAt': FieldValue.serverTimestamp(),
+        ..._consistencyFields(ctx: ctx, currentVersion: version),
+      });
+
+      tx.set(auditRef, _buildAuditEntry(
+        id: auditRef.id,
+        ctx: ctx,
+        jobId: jobId,
+        jobStatusBefore: status.name,
+        jobStatusAfter: null,
+        versionBefore: version,
+        delta: {
+          'confirmedAppointment': slot.toIso8601String(),
+          'schedulingStatus': SchedulingStatus.scheduled.name,
+        },
+      ));
+    });
+  }
+
+  /// Customer confirms negotiation is finished and locks the terms in —
+  /// the "Negotiation Completed / Agreement Confirmation" checkpoint. No
+  /// JobStatus change (still inChat); [agreementStatus] moves to
+  /// pendingArtisanConfirmation, mirroring how [updateJobProgress] advances
+  /// [progressStage] without touching JobStatus. [scope] and, if provided,
+  /// [price] are locked at this point — see [canConfirmAgreement] for the
+  /// full precondition and [_isValidJobTransition] in firestore.rules for
+  /// the server-enforced mirror of this same check.
+  Future<void> confirmAgreementAsCustomer(
+    JobMutationContext ctx,
+    String jobId, {
+    required String scope,
+    double? price,
+  }) async {
+    final jobRef = _jobRef(jobId);
+    final auditRef = _auditRef(jobId);
+
+    await _db.runTransaction((tx) async {
+      final snap = await tx.get(jobRef);
+      if (!snap.exists) throw JobNotFoundException(jobId);
+
+      final job = JobModel.fromJson({...snap.data()!, 'id': jobId});
+      if (!canConfirmAgreement(job, ctx.actorId)) {
+        throw JobStateConflictException(
+          'Cannot confirm agreement: job must be inChat with an accepted '
+          'quote, caller must be the customer, and the agreement must not '
+          'already be pending or confirmed (current: '
+          '"${(job.agreementStatus ?? AgreementStatus.negotiating).name}").',
+        );
+      }
+
+      final version = job.updateVersion;
+      final now = FieldValue.serverTimestamp();
+
+      tx.update(jobRef, {
+        'agreementStatus': AgreementStatus.pendingArtisanConfirmation.name,
+        'agreementScope': scope,
+        'agreementConfirmedByCustomer': true,
+        'agreementCustomerConfirmedAt': now,
+        'agreementUpdatedAt': now,
+        'agreedAmount': ?price,
+        ..._consistencyFields(ctx: ctx, currentVersion: version),
+      });
+
+      tx.set(auditRef, _buildAuditEntry(
+        id: auditRef.id,
+        ctx: ctx,
+        jobId: jobId,
+        jobStatusBefore: job.status.name,
+        jobStatusAfter: null,
+        versionBefore: version,
+        delta: {
+          'agreementStatus': AgreementStatus.pendingArtisanConfirmation.name,
+          'agreementScope': scope,
+          'agreedAmount': ?price,
+        },
+      ));
+    });
+  }
+
+  /// Artisan accepts the customer-confirmed agreement — the job may now
+  /// proceed to scheduling/payment. See [canRespondToAgreement].
+  Future<void> acceptAgreementAsArtisan(
+    JobMutationContext ctx,
+    String jobId,
+  ) async {
+    final jobRef = _jobRef(jobId);
+    final auditRef = _auditRef(jobId);
+
+    await _db.runTransaction((tx) async {
+      final snap = await tx.get(jobRef);
+      if (!snap.exists) throw JobNotFoundException(jobId);
+
+      final job = JobModel.fromJson({...snap.data()!, 'id': jobId});
+      if (!canRespondToAgreement(job, ctx.actorId)) {
+        throw JobStateConflictException(
+          'Cannot accept agreement: job must be inChat, caller must be the '
+          'job\'s matched artisan, and agreement must be pending artisan '
+          'confirmation (current: '
+          '"${(job.agreementStatus ?? AgreementStatus.negotiating).name}").',
+        );
+      }
+
+      final version = job.updateVersion;
+      final now = FieldValue.serverTimestamp();
+
+      tx.update(jobRef, {
+        'agreementStatus': AgreementStatus.confirmed.name,
+        'agreementConfirmedByArtisan': true,
+        'agreementArtisanConfirmedAt': now,
+        'agreementUpdatedAt': now,
+        ..._consistencyFields(ctx: ctx, currentVersion: version),
+      });
+
+      tx.set(auditRef, _buildAuditEntry(
+        id: auditRef.id,
+        ctx: ctx,
+        jobId: jobId,
+        jobStatusBefore: job.status.name,
+        jobStatusAfter: null,
+        versionBefore: version,
+        delta: {'agreementStatus': AgreementStatus.confirmed.name},
+      ));
+    });
+  }
+
+  /// Artisan sends the agreement back for further negotiation instead of
+  /// accepting it. Only the artisan's own confirmation flag is touched —
+  /// the customer's [agreementConfirmedByCustomer]/timestamp are left as
+  /// historical record and are naturally overwritten on their next confirm.
+  Future<void> requestAgreementChanges(
+    JobMutationContext ctx,
+    String jobId, {
+    required String reason,
+  }) async {
+    final jobRef = _jobRef(jobId);
+    final auditRef = _auditRef(jobId);
+
+    await _db.runTransaction((tx) async {
+      final snap = await tx.get(jobRef);
+      if (!snap.exists) throw JobNotFoundException(jobId);
+
+      final job = JobModel.fromJson({...snap.data()!, 'id': jobId});
+      if (!canRespondToAgreement(job, ctx.actorId)) {
+        throw JobStateConflictException(
+          'Cannot request changes: job must be inChat, caller must be the '
+          'job\'s matched artisan, and agreement must be pending artisan '
+          'confirmation (current: '
+          '"${(job.agreementStatus ?? AgreementStatus.negotiating).name}").',
+        );
+      }
+
+      final version = job.updateVersion;
+      final now = FieldValue.serverTimestamp();
+
+      tx.update(jobRef, {
+        'agreementStatus': AgreementStatus.changesRequested.name,
+        'agreementConfirmedByArtisan': false,
+        'agreementChangesRequestedReason': reason,
+        'agreementUpdatedAt': now,
+        ..._consistencyFields(ctx: ctx, currentVersion: version),
+      });
+
+      tx.set(auditRef, _buildAuditEntry(
+        id: auditRef.id,
+        ctx: ctx,
+        jobId: jobId,
+        jobStatusBefore: job.status.name,
+        jobStatusAfter: null,
+        versionBefore: version,
+        delta: {
+          'agreementStatus': AgreementStatus.changesRequested.name,
+          'reason': reason,
+        },
+      ));
+    });
+  }
+
+  /// Stage 5 (D7): the artisan accepts a booking request — matched -> inChat
+  /// with the booking confirmed, stamped with server time.
+  Future<void> confirmBooking(JobMutationContext ctx, String jobId) async {
+    final jobRef = _jobRef(jobId);
+    final auditRef = _auditRef(jobId);
+    await _db.runTransaction((tx) async {
+      final snap = await tx.get(jobRef);
+      if (!snap.exists) throw JobNotFoundException(jobId);
+      final job = JobModel.fromJson({...snap.data()!, 'id': jobId});
+      if (!canConfirmBooking(job, ctx.actorId)) {
+        throw JobStateConflictException(
+          'This booking can no longer be confirmed (status: "${job.status.name}").',
+        );
+      }
+      final version = job.updateVersion;
+      tx.update(jobRef, {
+        'status': JobStatus.inChat.name,
+        'bookingStatus': 'confirmed',
+        'bookingConfirmedAt': FieldValue.serverTimestamp(),
+        ..._consistencyFields(ctx: ctx, currentVersion: version),
+      });
+      tx.set(auditRef, _buildAuditEntry(
+        id: auditRef.id,
+        ctx: ctx,
+        jobId: jobId,
+        jobStatusBefore: job.status.name,
+        jobStatusAfter: JobStatus.inChat.name,
+        versionBefore: version,
+        delta: {'bookingStatus': 'confirmed'},
+      ));
+    });
+  }
+
+  /// Stage 5 (D4): the customer's single rework request — submitted ->
+  /// inProgress with a reason. The review-window timers are cleared
+  /// server-side, and the artisan's resubmission starts a new 14-day window.
+  Future<void> requestRework(
+    JobMutationContext ctx,
+    String jobId, {
+    required String reason,
+  }) async {
+    final trimmed = reason.trim();
+    if (trimmed.length < 10) {
+      throw const JobStateConflictException('Please describe what needs to change (at least 10 characters).');
+    }
+    final jobRef = _jobRef(jobId);
+    final auditRef = _auditRef(jobId);
+    await _db.runTransaction((tx) async {
+      final snap = await tx.get(jobRef);
+      if (!snap.exists) throw JobNotFoundException(jobId);
+      final job = JobModel.fromJson({...snap.data()!, 'id': jobId});
+      if (!canRequestRework(job, ctx.actorId)) {
+        throw const JobStateConflictException('Rework can only be requested once, on submitted work.');
+      }
+      final version = job.updateVersion;
+      tx.update(jobRef, {
+        'status': JobStatus.inProgress.name,
+        'reworkCount': 1,
+        'reworkReason': trimmed,
+        'reworkRequestedAt': FieldValue.serverTimestamp(),
+        ..._consistencyFields(ctx: ctx, currentVersion: version),
+      });
+      tx.set(auditRef, _buildAuditEntry(
+        id: auditRef.id,
+        ctx: ctx,
+        jobId: jobId,
+        jobStatusBefore: job.status.name,
+        jobStatusAfter: JobStatus.inProgress.name,
+        versionBefore: version,
+        delta: {'reworkCount': 1, 'reworkReason': trimmed},
+      ));
+    });
+  }
+
+  /// Stage 5 (D4): the artisan's single response to a rework request.
+  Future<void> respondToRework(
+    JobMutationContext ctx,
+    String jobId, {
+    required String response,
+  }) async {
+    final trimmed = response.trim();
+    if (trimmed.isEmpty) throw const JobStateConflictException('Please write a response.');
+    final jobRef = _jobRef(jobId);
+    final auditRef = _auditRef(jobId);
+    await _db.runTransaction((tx) async {
+      final snap = await tx.get(jobRef);
+      if (!snap.exists) throw JobNotFoundException(jobId);
+      final job = JobModel.fromJson({...snap.data()!, 'id': jobId});
+      if (!canRespondToRework(job, ctx.actorId)) {
+        throw const JobStateConflictException('There is no open rework request to respond to.');
+      }
+      final version = job.updateVersion;
+      tx.update(jobRef, {
+        'reworkResponse': trimmed,
+        'reworkRespondedAt': FieldValue.serverTimestamp(),
+        ..._consistencyFields(ctx: ctx, currentVersion: version),
+      });
+      tx.set(auditRef, _buildAuditEntry(
+        id: auditRef.id,
+        ctx: ctx,
+        jobId: jobId,
+        jobStatusBefore: job.status.name,
+        jobStatusAfter: null,
+        versionBefore: version,
+        delta: {'reworkResponse': trimmed},
+      ));
+    });
+  }
+
+  /// Files a paid-job cancellation request for admin review (policy D2).
+  /// No status change, no escrow/payment field touched — the
+  /// onJobCompleted Cloud Function raises an admin alert and tells the
+  /// other party. See [canRequestPaidCancellation].
+  Future<void> requestPaidCancellation(
+    JobMutationContext ctx,
+    String jobId, {
+    required String reason,
+  }) async {
+    final jobRef = _jobRef(jobId);
+    final auditRef = _auditRef(jobId);
+
+    await _db.runTransaction((tx) async {
+      final snap = await tx.get(jobRef);
+      if (!snap.exists) throw JobNotFoundException(jobId);
+
+      final job = JobModel.fromJson({...snap.data()!, 'id': jobId});
+      if (!canRequestPaidCancellation(job, ctx.actorId)) {
+        throw JobStateConflictException(
+          'A cancellation request can only be filed by a party to a funded '
+          'job (escrowLocked/inProgress) with no request already pending '
+          '(current status: "${job.status.name}").',
+        );
+      }
+
+      final version = job.updateVersion;
+
+      tx.update(jobRef, {
+        'cancellationRequestStatus': 'pending',
+        'cancellationRequestedBy': ctx.actorId,
+        'cancellationRequestReason': reason,
+        'cancellationRequestedAt': FieldValue.serverTimestamp(),
+        ..._consistencyFields(ctx: ctx, currentVersion: version),
+      });
+
+      tx.set(auditRef, _buildAuditEntry(
+        id: auditRef.id,
+        ctx: ctx,
+        jobId: jobId,
+        jobStatusBefore: job.status.name,
+        jobStatusAfter: null,
+        versionBefore: version,
+        delta: {'cancellationRequestStatus': 'pending', 'reason': reason},
+      ));
+    });
+  }
+
+  Future<void> cancelJob(
+    JobMutationContext ctx,
+    String jobId, {
+    String? cancelledBy,
+    String? cancellationReason,
+  }) =>
+      updateJobStatus(ctx, jobId, JobStatus.cancelled, extra: {
+        'cancelledBy': ?cancelledBy,
+        'cancellationReason': ?cancellationReason,
+        'cancelledAt': FieldValue.serverTimestamp(),
+      });
 
   /// Raises a dispute: transitions the job to 'disputed' AND creates the
   /// dispute record — all in one transaction. Modeled on [confirmComplete],
@@ -451,7 +1056,7 @@ class JobService {
       tx.update(jobRef, {
         'status': JobStatus.resolved.name,
         'disputeResolution': resolution,
-        ..._timestampsForStatus(JobStatus.resolved),
+        ...timestampsForStatus(JobStatus.resolved),
         ..._consistencyFields(ctx: ctx, currentVersion: version),
       });
 
@@ -525,7 +1130,9 @@ class JobService {
       tx.update(jobRef, {
         'status': JobStatus.matched.name,
         'artisanId': artisanId,
-        ..._timestampsForStatus(JobStatus.matched),
+        // Stage 5 (D7): the artisan must still confirm the booking.
+        'bookingStatus': 'awaitingArtisan',
+        ...timestampsForStatus(JobStatus.matched),
         ..._consistencyFields(ctx: ctx, currentVersion: version),
       });
 
@@ -609,23 +1216,44 @@ class JobService {
         data.entries.where((e) => e.value is! FieldValue),
       );
 
-  /// Server-side timestamps for status milestones — no client clock dependency.
-  static Map<String, dynamic> _timestampsForStatus(JobStatus status) =>
+  /// The single duration both the customer-facing dispute countdown and
+  /// the Cloud Functions auto-release cron are computed from — see
+  /// design/ESCROW_TIMING_AUDIT.md. Kept as one named constant so the two
+  /// can never independently drift again the way autoReleaseAt (previously
+  /// anchored to escrow-lock time, 48h) and disputeWindowEndsAt (anchored
+  /// to submission time, 14 days) drifted before: a job that took longer
+  /// than 48h to reach 'submitted' had already-expired autoReleaseAt the
+  /// moment it got there, so the auto-release cron (which only matches
+  /// status == 'submitted') would fire on the very next hourly run —
+  /// often within the hour — while the UI still showed up to 14 days left.
+  static const releaseWindow = Duration(days: 14);
+
+  /// Timestamps for status milestones. Public (not `_timestampsForStatus`)
+  /// for the same reason canConfirmAgreement/canInitPayment above are
+  /// public: so test/job_service_agreement_test.dart can assert the exact
+  /// map this produces — one copy of this logic, not a copy for tests and
+  /// a copy for production.
+  static Map<String, dynamic> timestampsForStatus(JobStatus status) =>
       switch (status) {
         JobStatus.matched => {'matchedAt': FieldValue.serverTimestamp()},
         JobStatus.escrowLocked => {
           'escrowLockedAt': FieldValue.serverTimestamp(),
-          'autoReleaseAt': Timestamp.fromDate(
-            DateTime.now().add(const Duration(days: 7)),
-          ),
+          // autoReleaseAt is deliberately NOT set here anymore — see
+          // design/ESCROW_TIMING_AUDIT.md. Setting it at lock time (as
+          // 48h out) was the root cause of the auto-release timing bug:
+          // it could expire before the job even reached 'submitted',
+          // since the auto-release cron only ever matches status ==
+          // 'submitted'. Its absence before submission is inert — the
+          // cron can't match a job that isn't submitted yet regardless.
+          // It's set once, correctly, at submission time below instead.
         },
         JobStatus.inProgress => {'startedAt': FieldValue.serverTimestamp()},
-        JobStatus.submitted => {
-          'submittedAt': FieldValue.serverTimestamp(),
-          'disputeWindowEndsAt': Timestamp.fromDate(
-            DateTime.now().add(const Duration(days: 14)),
-          ),
-        },
+        // Stage 2 (HT-005): only the server timestamp. disputeWindowEndsAt
+        // and autoReleaseAt are server-owned — onJobCompleted (Cloud
+        // Functions) sets both to submittedAt + releaseWindow, and the
+        // auto-release itself re-checks submittedAt. Computing them here
+        // used the artisan's device clock, which the artisan controls.
+        JobStatus.submitted => {'submittedAt': FieldValue.serverTimestamp()},
         JobStatus.completed || JobStatus.resolved => {
           'completedAt': FieldValue.serverTimestamp(),
         },

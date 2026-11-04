@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../core/services/auth_service.dart';
+import '../core/services/profile_service.dart';
 import '../models/user_model.dart';
 
 class AuthState {
@@ -23,7 +24,7 @@ class AuthState {
 class AuthNotifier extends StateNotifier<AuthState> {
   AuthNotifier(this._authService) : super(const AuthState());
 
-  final AuthService _authService;
+  final IAuthService _authService;
 
   Future<bool> signUp({
     required String email,
@@ -90,13 +91,34 @@ class AuthNotifier extends StateNotifier<AuthState> {
       _authService.currentUser?.email?.toLowerCase() ==
       attemptedEmail.trim().toLowerCase();
 
-  Future<void> sendPasswordReset(String email) async {
+  /// P0 remediation (design/P0_REMEDIATION_PLAN.md §6.3): previously
+  /// `void`-returning, catching FirebaseAuthException internally without
+  /// rethrowing — the caller (ForgotPasswordScreen) had no way to tell a
+  /// real failure (rate-limited, network error, etc.) from success, so it
+  /// showed "Check your inbox" regardless. Now matches the same
+  /// return-bool-and-read-.error convention [signIn]/[signUp] already use.
+  ///
+  /// `user-not-found` is deliberately treated as success (not surfaced as
+  /// an error) — Firebase Auth's own privacy-preserving behavior for
+  /// password reset is to not reveal whether an account exists, and this
+  /// notifier must not undermine that by showing a different UI state for
+  /// a nonexistent account than for a real one.
+  Future<bool> sendPasswordReset(String email) async {
     state = state.copyWith(isLoading: true, error: null);
     try {
       await _authService.sendPasswordReset(email);
       state = state.copyWith(isLoading: false);
+      return true;
     } on FirebaseAuthException catch (e) {
+      if (e.code == 'user-not-found') {
+        state = state.copyWith(isLoading: false);
+        return true;
+      }
       state = state.copyWith(isLoading: false, error: AuthService.friendlyError(e));
+      return false;
+    } catch (e) {
+      state = state.copyWith(isLoading: false, error: 'Something went wrong. Please try again.');
+      return false;
     }
   }
 
@@ -120,6 +142,8 @@ class AuthNotifier extends StateNotifier<AuthState> {
 }
 
 final authServiceProvider = Provider<AuthService>((ref) => AuthService());
+
+final profileServiceProvider = Provider<ProfileService>((ref) => ProfileService());
 
 final authNotifierProvider = StateNotifierProvider<AuthNotifier, AuthState>(
   (ref) => AuthNotifier(ref.watch(authServiceProvider)),

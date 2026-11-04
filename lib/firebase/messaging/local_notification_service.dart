@@ -1,7 +1,6 @@
-import 'dart:io';
 import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform, debugPrint;
 
 /// Top-level FCM background handler — must be a top-level function and annotated
 /// so the Dart compiler does not tree-shake it in release builds.
@@ -38,8 +37,14 @@ class LocalNotificationService {
   /// Must be called once from main() after WidgetsFlutterBinding.ensureInitialized()
   /// and after Firebase.initializeApp().
   Future<void> init() async {
-    // Register background handler before any other FCM setup
-    FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+    // Register background handler before any other FCM setup (only on native)
+    try {
+      if (!kIsWeb) {
+        FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+      }
+    } catch (e) {
+      debugPrint('[LocalNotif] onBackgroundMessage registration skipped: $e');
+    }
 
     const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
     const iosInit = DarwinInitializationSettings(
@@ -48,16 +53,25 @@ class LocalNotificationService {
       requestSoundPermission: false,
     );
 
-    await _plugin.initialize(
-      const InitializationSettings(android: androidInit, iOS: iosInit),
-    );
+    // flutter_local_notifications is not required on web. Initialize only on native.
+    try {
+      if (!kIsWeb) {
+        await _plugin.initialize(
+          const InitializationSettings(android: androidInit, iOS: iosInit),
+        );
 
-    // Create the Android notification channel
-    if (!kIsWeb && Platform.isAndroid) {
-      await _plugin
-          .resolvePlatformSpecificImplementation<
-              AndroidFlutterLocalNotificationsPlugin>()
-          ?.createNotificationChannel(_channel);
+        // Create the Android notification channel when running on Android.
+        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+          await _plugin
+              .resolvePlatformSpecificImplementation<
+                  AndroidFlutterLocalNotificationsPlugin>()
+              ?.createNotificationChannel(_channel);
+        }
+      } else {
+        debugPrint('[LocalNotif] skipping plugin initialization on web');
+      }
+    } catch (e) {
+      debugPrint('[LocalNotif] init failed or skipped: $e');
     }
   }
 
@@ -97,6 +111,10 @@ class LocalNotificationService {
   /// (toggled mid-session) takes effect without re-registering the listener.
   void startForegroundListener({bool Function() isEnabled = _alwaysEnabled}) {
     _isEnabled = isEnabled;
+    if (kIsWeb) {
+      debugPrint('[LocalNotif] startForegroundListener skipped on web');
+      return;
+    }
     if (_foregroundListenerRegistered) return;
     _foregroundListenerRegistered = true;
     FirebaseMessaging.onMessage.listen((RemoteMessage message) {
@@ -145,6 +163,10 @@ class LocalNotificationService {
     String? payload,
   }) async {
     try {
+      if (kIsWeb) {
+        debugPrint('[LocalNotif] _show skipped on web');
+        return;
+      }
       final androidDetails = AndroidNotificationDetails(
         _channel.id,
         _channel.name,
@@ -167,4 +189,26 @@ class LocalNotificationService {
       debugPrint('[LocalNotif] show failed: $e');
     }
   }
+}
+
+// Utility to parse route from incoming RemoteMessage. Keeps payload handling
+// consistent across background/foreground/tapped notifications. Returns a
+// route string or null if none found.
+String? routeFromMessage(RemoteMessage message) {
+  try {
+    // Prefer explicit 'route' in data, fall back to path-like fields.
+    final data = message.data;
+    if (data.containsKey('route') && (data['route'] as String).isNotEmpty) {
+      return data['route'] as String;
+    }
+    if (data.containsKey('jobId')) {
+      return '/job/${data['jobId']}';
+    }
+    if (data.containsKey('chatJobId')) {
+      return '/chat/${data['chatJobId']}';
+    }
+  } catch (e) {
+    debugPrint('[LocalNotif] routeFromMessage parse failed: $e');
+  }
+  return null;
 }

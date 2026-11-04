@@ -40,6 +40,81 @@ service cloud.firestore {
       return exists(/databases/$(database)/documents/artisans/$(uid));
     }
 
+    // Suspension (policy D9): blocks NEW marketplace activity only — posting
+    // jobs, quoting, being hired, pre-match chat. Transitions on jobs that
+    // already exist deliberately do NOT call this, so escrow, disputes and
+    // in-flight work are never frozen or redirected by a suspension.
+    function isNotSuspended(uid) {
+      return !exists(/databases/$(database)/documents/users/$(uid)) ||
+        get(/databases/$(database)/documents/users/$(uid)).data.get('accountStatus', 'active') != 'suspended';
+    }
+
+    function changedKeys() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    // Policy D1 (Stage 4): minimum eligible service price, from trusted
+    // backend config (config/platform is Admin-SDK/console write only).
+    // Default mirrors PLATFORM_CONFIG_DEFAULTS.minJobValueNgn in functions.
+    function minJobValueNgn() {
+      let cfg = /databases/$(database)/documents/config/platform;
+      return exists(cfg) ? get(cfg).data.get('minJobValueNgn', 3212) : 3212;
+    }
+
+    // Stage 5: numeric deadline settings from trusted backend config
+    // (config/platform). Defaults mirror PLATFORM_CONFIG_DEFAULTS.
+    function cfgNum(key, dflt) {
+      let cfg = /databases/$(database)/documents/config/platform;
+      return exists(cfg) ? get(cfg).data.get(key, dflt) : dflt;
+    }
+
+    // Stage 5 (D9): a fraud / safety / security suspension — or an
+    // unclassified one, failing closed — freezes the user's participation in
+    // their EXISTING jobs too (no progress, no money operations). Only
+    // administrative / verification suspensions keep the restricted
+    // existing-jobs mode. Cancelling unfunded work, disputes and paid-
+    // cancellation requests stay available to everyone.
+    function isFreezingSuspended(uid) {
+      let p = /databases/$(database)/documents/users/$(uid);
+      return exists(p) &&
+        get(p).data.get('accountStatus', 'active') == 'suspended' &&
+        !(get(p).data.get('suspensionType', '') in ['administrative', 'verification']);
+    }
+
+    // Stage 6 (policy D8): an artisan's self-declared service area. GPS is
+    // captured once on request (no background tracking); the radius is
+    // bounded by trusted config.
+    function _validServiceArea() {
+      let d = request.resource.data;
+      let ck = changedKeys();
+      return (!ck.hasAny(['serviceRadiusKm']) ||
+          (d.serviceRadiusKm is number && d.serviceRadiusKm >= 1 &&
+           d.serviceRadiusKm <= cfgNum('maxServiceRadiusKm', 25))) &&
+        (!ck.hasAny(['latitude']) || (d.latitude is number && d.latitude >= -90 && d.latitude <= 90)) &&
+        (!ck.hasAny(['longitude']) || (d.longitude is number && d.longitude >= -180 && d.longitude <= 180)) &&
+        (!ck.hasAny(['serviceAddress']) || (d.serviceAddress is string && d.serviceAddress.size() <= 300)) &&
+        (!ck.hasAny(['serviceLocationUpdatedAt']) || d.serviceLocationUpdatedAt == request.time);
+    }
+
+    // Stage 4: fields only the server may ever write on users/artisans
+    // (fraud/safety suspension classification and payout freezes).
+    function _serverOnlyFreezeFields() {
+      return ['suspensionType', 'payoutFrozen', 'payoutFreezeReason', 'payoutFreezeBy', 'payoutFreezeAt'];
+    }
+
+    // Sender (request.auth.uid) → recipient (to) is a real relationship on
+    // job j: the two matched parties, or — while the job is still open — an
+    // artisan writing to its customer, or its customer writing to an artisan
+    // (quote rejected / reply in pre-match chat). See notifications rule.
+    function _isNotificationRelationship(j, to) {
+      let me = request.auth.uid;
+      let art = j.get('artisanId', '');
+      return (art != '' &&
+               ((me == j.customerId && to == art) || (me == art && to == j.customerId))) ||
+        (j.status == 'requested' && to == j.customerId && isArtisanAccount(me)) ||
+        (j.status == 'requested' && me == j.customerId && isArtisanAccount(to));
+    }
+
     // ─── Users ──────────────────────────────────────────────────────────────
     // Only the owner or admin can read a profile.
     // Anonymous and cross-user reads are blocked to protect phone numbers / PII.
@@ -54,8 +129,25 @@ service cloud.firestore {
       allow update: if isAdmin() ||
         (isOwner(uid) &&
           !request.resource.data.diff(resource.data).affectedKeys()
-            .hasAny(['accountStatus']));
-      allow delete: if isAdmin();
+            .hasAny(['accountStatus'].concat(_serverOnlyFreezeFields())));
+      // Previously isAdmin() — allowed a direct client-side delete that
+      // skipped the audit log, Storage cleanup, and Firebase Auth deletion
+      // that only the adminDeleteUser Cloud Function performs (design/
+      // ADMIN_USER_DELETION_AUDIT.md). Admin SDK calls bypass rules
+      // regardless, so this does not block that function — it only closes
+      // the partial, unaudited delete path a client (even an authenticated
+      // admin's own app) previously had.
+      allow delete: if false;
+    }
+
+    // ─── User favorites (saved artisans) ─────────────────────────────────────
+    // Stored at users/{uid}/favorites/{artisanId} — doc ID equals artisanId.
+    // Only the owning customer reads/manages their own list; no cross-user access.
+    match /users/{uid}/favorites/{artisanId} {
+      allow read:   if isOwner(uid);
+      allow create: if isOwner(uid) && request.resource.data.artisanId == artisanId;
+      allow delete: if isOwner(uid);
+      allow update: if false;
     }
 
     // ─── Artisans ───────────────────────────────────────────────────────────
@@ -69,22 +161,58 @@ service cloud.firestore {
         isOwner(uid) ||
         isAdmin()
       );
+      // HT-045: create previously checked only approvalStatus, so an artisan
+      // could create their own profile already verificationStatus:'trusted',
+      // betaTester:true, 5★ from 900 ratings — then be publicly "Verified"
+      // the moment an admin approved the profile. Every trust/stat field must
+      // start at the same default artisan_registration_screen.dart writes.
       allow create: if isOwner(uid) && request.resource.data.uid == uid &&
-        request.resource.data.approvalStatus == 'pending';
+        request.resource.data.approvalStatus == 'pending' &&
+        request.resource.data.get('verificationStatus', 'unverified') == 'unverified' &&
+        request.resource.data.get('rating', 0) == 0 &&
+        request.resource.data.get('totalRatings', 0) == 0 &&
+        request.resource.data.get('totalJobs', 0) == 0 &&
+        request.resource.data.get('completedJobs', 0) == 0 &&
+        request.resource.data.get('trustScore', 0) == 0 &&
+        request.resource.data.get('cancelledJobsCount', 0) == 0 &&
+        request.resource.data.get('cancellationRatePercent', 0) == 0 &&
+        request.resource.data.get('openDisputeCount', 0) == 0 &&
+        request.resource.data.get('responseRatePercent', 100) == 100 &&
+        request.resource.data.get('responseTimeMinutes', 30) == 30 &&
+        // Stage 7.2: server-computed response-time inputs (trust score).
+        !request.resource.data.keys().hasAny(['responseTimeSampleSize', 'responseTimeUpdatedAt']) &&
+        request.resource.data.get('isVerified', false) == false &&
+        request.resource.data.get('betaTester', false) == false &&
+        request.resource.data.get('accountStatus', 'active') == 'active';
       // Owner can update non-sensitive fields; rating/stats managed by Cloud Functions.
-      // verificationStatus may only be self-escalated to 'id_submitted' —
-      // 'id_verified'/'trusted' are admin-only, granted via VerificationService.
+      // responseTimeMinutes added (HT-019): it is a 15% trust-score input.
+      // verificationStatus may only move to 'id_submitted' / 'pending_later'
+      // when the matching verifications/{uid} record exists in that state
+      // after this write (VerificationService.submit/deferVerification write
+      // both in one batch, which getAfter() sees) — previously an artisan
+      // could self-claim id_submitted (half the verification weight) with no
+      // documents at all. 'id_verified'/'trusted' remain admin-only.
       allow update: if isAdmin() ||
         (isOwner(uid) &&
-          !request.resource.data.diff(resource.data).affectedKeys()
+          !changedKeys()
             .hasAny(['rating', 'totalRatings', 'completedJobs', 'totalJobs',
                      'trustScore', 'approvalStatus', 'isVerified',
                      'cancelledJobsCount', 'cancellationRatePercent',
                      'openDisputeCount', 'responseRatePercent',
-                     'accountStatus']) &&
-          (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['verificationStatus']) ||
-            request.resource.data.verificationStatus in ['unverified', 'id_submitted', 'pending_later']));
-      allow delete: if isAdmin();
+                     'accountStatus', 'betaTester', 'responseTimeMinutes',
+                     'responseTimeSampleSize', 'responseTimeUpdatedAt', 'uid',
+                     'suspensionType', 'payoutFrozen', 'payoutFreezeReason',
+                     'payoutFreezeBy', 'payoutFreezeAt']) &&
+          _validServiceArea() &&
+          (!changedKeys().hasAny(['verificationStatus']) ||
+            request.resource.data.verificationStatus == 'unverified' ||
+            (request.resource.data.verificationStatus == 'id_submitted' &&
+              getAfter(/databases/$(database)/documents/verifications/$(uid)).data.status == 'pending') ||
+            (request.resource.data.verificationStatus == 'pending_later' &&
+              getAfter(/databases/$(database)/documents/verifications/$(uid)).data.status == 'pending_later')));
+      // See users/{uid}'s delete rule above — same reasoning. Deletion is
+      // adminDeleteUser Cloud Function only, never a direct client delete.
+      allow delete: if false;
     }
 
     // ─── Artisan private data (bank details, ID docs) ────────────────────────
@@ -105,15 +233,40 @@ service cloud.firestore {
         isAdmin()
       );
 
-      // Customer creates job — must start in 'requested' status
+      // Customer creates job — must start in 'requested' status, unassigned
+      // and un-agreed. HT-046: previously only customerId/status were
+      // checked, so a job could be created with artisanId, agreementStatus:
+      // 'confirmed', agreedAmount, or payout timers already set — skipping
+      // the artisan's own agreement confirmation entirely. Key list mirrors
+      // JobModel.toJson() for a fresh job + FirestoreRepository.createJob.
       allow create: if isSignedIn() &&
         request.resource.data.customerId == request.auth.uid &&
-        request.resource.data.status == 'requested';
+        request.resource.data.status == 'requested' &&
+        isNotSuspended(request.auth.uid) &&
+        request.resource.data.get('artisanId', '') == '' &&
+        request.resource.data.get('agreementConfirmedByCustomer', false) == false &&
+        request.resource.data.get('agreementConfirmedByArtisan', false) == false &&
+        request.resource.data.get('updateVersion', 0) == 0 &&
+        request.resource.data.get('completionImageUrls', []).size() == 0 &&
+        request.resource.data.keys().hasOnly([
+          'id', 'customerId', 'artisanId', 'category', 'description', 'imageUrls',
+          'completionImageUrls', 'status', 'customerLat', 'customerLng', 'customerAddress',
+          'budgetMin', 'budgetMax', 'urgency', 'scheduledDate', 'createdAt',
+          'agreementConfirmedByCustomer', 'agreementConfirmedByArtisan', 'aiSuggestion',
+          'updateVersion', 'lastUpdatedAt', 'lastUpdatedBy',
+          // Stage 6 (P-K, D9): coarse area only — the exact location goes to
+          // jobs/{id}/private/location. (Exact fields above remain accepted
+          // from older app builds; a server trigger moves them within seconds.)
+          'areaLat', 'areaLng', 'areaGeohash3', 'areaGeohash4', 'areaLabel'
+        ]);
 
       // Validated state machine transitions
       allow update: if isSignedIn() && _isValidJobTransition(jobId);
 
-      // Either party may record the negotiated price while in chat.
+      // Either party may record the negotiated price while in chat — but
+      // NOT once the agreement is confirmed (locked terms per the
+      // Negotiation Completed checkpoint below). Legacy docs predating
+      // this field use .get(..., 'negotiating') so they don't error out.
       // JobService.sendNegotiation writes agreedAmount + the three consistency
       // fields atomically — all four keys must be allowed together.
       // Intentionally separate from _isValidJobTransition — no status change occurs.
@@ -122,9 +275,156 @@ service cloud.firestore {
          resource.data.artisanId  == request.auth.uid) &&
         request.resource.data.diff(resource.data).affectedKeys()
           .hasOnly(['agreedAmount', 'lastUpdatedAt', 'lastUpdatedBy', 'updateVersion']) &&
-        resource.data.status == 'inChat';
+        // P0 remediation (design/P0_REMEDIATION_PLAN.md §4.4): agreedAmount
+        // previously had no type/bound check at all — this is the field a
+        // fabricated payout amount was derived from before
+        // processEscrowRelease's agreedAmount fallback was removed
+        // server-side. Kept here too as defense-in-depth even though the
+        // fallback removal is the primary fix.
+        request.resource.data.agreedAmount is number &&
+        request.resource.data.agreedAmount > 0 &&
+        resource.data.status == 'inChat' &&
+        resource.data.get('agreementStatus', 'negotiating') != 'confirmed' &&
+        !isFreezingSuspended(request.auth.uid);
 
-      allow delete: if isAdmin();
+      // ─── Agreement confirmation (Negotiation Completed checkpoint) ───────
+      // Turns "we're done negotiating" into an explicit, two-party,
+      // state-controlled checkpoint instead of relying on conversation
+      // history. agreementStatus is a sub-state within inChat, mirroring
+      // how progressStage is a sub-state within inProgress — no new
+      // JobStatus value, same pattern as the rule above/below it.
+
+      // Customer locks the negotiated terms and hands off to the artisan.
+      // Only valid from negotiating/changesRequested (or unset, on a job
+      // that hasn't started this flow yet) — cannot re-confirm while
+      // already pending or confirmed. Can never touch the artisan's own
+      // confirmation fields.
+      allow update: if isSignedIn() &&
+        resource.data.customerId == request.auth.uid &&
+        resource.data.status == 'inChat' &&
+        resource.data.get('agreementStatus', 'negotiating') in ['negotiating', 'changesRequested'] &&
+        request.resource.data.agreementStatus == 'pendingArtisanConfirmation' &&
+        request.resource.data.agreementConfirmedByCustomer == true &&
+        // D1 (Stage 4): terms below the minimum job value can't be confirmed.
+        request.resource.data.get('agreedAmount', 0) is number &&
+        request.resource.data.get('agreedAmount', 0) >= minJobValueNgn() &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['agreementStatus', 'agreementScope', 'agreedAmount',
+                    'agreementConfirmedByCustomer', 'agreementCustomerConfirmedAt',
+                    'agreementUpdatedAt',
+                    'lastUpdatedAt', 'lastUpdatedBy', 'updateVersion']) &&
+        !isFreezingSuspended(request.auth.uid);
+
+      // Artisan accepts — job may now proceed to payment. Can never touch
+      // the customer's own confirmation fields.
+      allow update: if isSignedIn() &&
+        resource.data.artisanId == request.auth.uid &&
+        resource.data.status == 'inChat' &&
+        resource.data.get('agreementStatus', 'negotiating') == 'pendingArtisanConfirmation' &&
+        request.resource.data.agreementStatus == 'confirmed' &&
+        request.resource.data.agreementConfirmedByArtisan == true &&
+        resource.data.get('agreedAmount', 0) is number &&
+        resource.data.get('agreedAmount', 0) >= minJobValueNgn() &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['agreementStatus', 'agreementConfirmedByArtisan',
+                    'agreementArtisanConfirmedAt', 'agreementUpdatedAt',
+                    'lastUpdatedAt', 'lastUpdatedBy', 'updateVersion']) &&
+        !isFreezingSuspended(request.auth.uid);
+
+      // Artisan requests changes instead of accepting — returns to
+      // negotiating. Only resets the artisan's OWN confirmation flag; the
+      // customer's fields are left untouched (never in this rule's
+      // affectedKeys) and are naturally overwritten on their next confirm.
+      allow update: if isSignedIn() &&
+        resource.data.artisanId == request.auth.uid &&
+        resource.data.status == 'inChat' &&
+        resource.data.get('agreementStatus', 'negotiating') == 'pendingArtisanConfirmation' &&
+        request.resource.data.agreementStatus == 'changesRequested' &&
+        request.resource.data.agreementConfirmedByArtisan == false &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['agreementStatus', 'agreementChangesRequestedReason',
+                    'agreementConfirmedByArtisan', 'agreementUpdatedAt',
+                    'lastUpdatedAt', 'lastUpdatedBy', 'updateVersion']) &&
+        !isFreezingSuspended(request.auth.uid);
+
+      // Artisan proposes appointment slots while job is inChat — no status change.
+      allow update: if isSignedIn() &&
+        resource.data.artisanId == request.auth.uid &&
+        resource.data.status == 'inChat' &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['appointmentSlots', 'lastUpdatedAt', 'lastUpdatedBy', 'updateVersion']) &&
+        !isFreezingSuspended(request.auth.uid);
+
+      // Customer confirms one slot while job is inChat — no status change.
+      // Also writes schedulingStatus/schedulingUpdatedAt in the same update
+      // — confirming a slot IS the Scheduled workflow stage completing
+      // (mirrors JobService.confirmAppointmentSlot's single transaction).
+      // HT-031: the confirmed appointment must be one the artisan actually
+      // proposed — previously the customer could write any time (or mark
+      // scheduling done with no slots proposed at all), bypassing the
+      // artisan's half of scheduling.
+      allow update: if isSignedIn() &&
+        resource.data.customerId == request.auth.uid &&
+        resource.data.status == 'inChat' &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['confirmedAppointment', 'schedulingStatus', 'schedulingUpdatedAt',
+                    'lastUpdatedAt', 'lastUpdatedBy', 'updateVersion']) &&
+        request.resource.data.confirmedAppointment in resource.data.get('appointmentSlots', []) &&
+        request.resource.data.schedulingStatus == 'scheduled' &&
+        !isFreezingSuspended(request.auth.uid);
+
+      // Paid-job cancellation REQUEST (policy D2). Once funds are held, no
+      // client may cancel — either party may only ask; an admin reviews it
+      // (admin_alerts entry written by onJobCompleted). No status change, and
+      // nothing here can touch escrow, payment or payout fields. One pending
+      // request at a time — the first request can't be overwritten.
+      allow update: if isSignedIn() &&
+        isJobParty(resource.data) &&
+        resource.data.status in ['escrowLocked', 'inProgress'] &&
+        resource.data.get('cancellationRequestStatus', 'none') != 'pending' &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['cancellationRequestStatus', 'cancellationRequestedBy',
+                    'cancellationRequestReason', 'cancellationRequestedAt',
+                    'lastUpdatedAt', 'lastUpdatedBy', 'updateVersion']) &&
+        request.resource.data.cancellationRequestStatus == 'pending' &&
+        request.resource.data.cancellationRequestedBy == request.auth.uid &&
+        request.resource.data.cancellationRequestReason is string &&
+        request.resource.data.cancellationRequestReason.size() > 0 &&
+        request.resource.data.cancellationRequestReason.size() <= 500 &&
+        request.resource.data.cancellationRequestedAt == request.time;
+
+      // Artisan advances the fine-grained progress stage while job is inProgress.
+      // No status change — only progress fields + the three consistency fields.
+      allow update: if isSignedIn() &&
+        resource.data.artisanId == request.auth.uid &&
+        resource.data.status == 'inProgress' &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['progressStage', 'progressUpdatedAt',
+                    'lastUpdatedAt', 'lastUpdatedBy', 'updateVersion']) &&
+        !isFreezingSuspended(request.auth.uid);
+
+      // Stage 5 rework: the artisan responds once to the customer's rework
+      // request (acknowledgement / plan) while the job is back in progress.
+      // Resubmission itself is the normal inProgress -> submitted transition.
+      allow update: if isSignedIn() &&
+        resource.data.artisanId == request.auth.uid &&
+        resource.data.status == 'inProgress' &&
+        resource.data.get('reworkCount', 0) == 1 &&
+        !('reworkResponse' in resource.data) &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['reworkResponse', 'reworkRespondedAt',
+                    'lastUpdatedAt', 'lastUpdatedBy', 'updateVersion']) &&
+        request.resource.data.reworkResponse is string &&
+        request.resource.data.reworkResponse.size() > 0 &&
+        request.resource.data.reworkResponse.size() <= 1000 &&
+        request.resource.data.reworkRespondedAt == request.time &&
+        !isFreezingSuspended(request.auth.uid);
+
+      // Stage 4 (HT-008): an admin may hard-delete only a job that never held
+      // funds. Funded/settled jobs are financial records and stay.
+      allow delete: if isAdmin() &&
+        (resource.data.status in ['requested', 'matched', 'inChat'] ||
+          (resource.data.status == 'cancelled' && !('paymentReference' in resource.data)));
 
       // ─── Audit logs (sub-collection per job) — IMMUTABLE ─────────────────
       // Written server-side by JobService inside every transaction.
@@ -132,25 +432,93 @@ service cloud.firestore {
       // update or delete — the audit trail is permanent.
       match /auditLogs/{logId} {
         allow read:   if isSignedIn() && (isJobParty(getJob(jobId)) || isAdmin());
-        allow create: if isSignedIn() && isJobParty(getJob(jobId));
+        // Stage 6 (HT-028): an entry can only be written by a job party (or
+        // admin), about this job, in its own name, stamped with server time,
+        // and never claiming an admin override — so a party can no longer
+        // forge entries attributed to someone else or backdate them.
+        allow create: if isSignedIn() &&
+          (isJobParty(getJob(jobId)) || isAdmin()) &&
+          request.resource.data.actorId == request.auth.uid &&
+          request.resource.data.jobId == jobId &&
+          request.resource.data.timestamp == request.time &&
+          (request.resource.data.get('isAdminOverride', false) == false || isAdmin());
         allow update: if false;
         allow delete: if false;
       }
 
+      // ─── Private job location (Stage 6, P-K, policy D9) ──────────────────
+      // The exact address/coordinates. Readable by the customer, admins, and
+      // the assigned artisan only once they have CONFIRMED the booking.
+      // Pre-booking artisans see only the job's coarse area.
+      match /private/{docId} {
+        allow read: if isSignedIn() && docId == 'location' && (
+          getJob(jobId).customerId == request.auth.uid ||
+          isAdmin() ||
+          (getJob(jobId).get('artisanId', '') == request.auth.uid &&
+            getJob(jobId).status in ['inChat', 'paymentPending', 'escrowLocked', 'inProgress',
+                                     'submitted', 'completed', 'disputed', 'resolved']));
+        allow create, update: if isSignedIn() && docId == 'location' &&
+          getAfter(/databases/$(database)/documents/jobs/$(jobId)).data.customerId == request.auth.uid &&
+          getAfter(/databases/$(database)/documents/jobs/$(jobId)).data.status == 'requested' &&
+          request.resource.data.keys().hasOnly(['customerAddress', 'customerLat', 'customerLng']) &&
+          (!('customerLat' in request.resource.data) || request.resource.data.customerLat is number) &&
+          (!('customerLng' in request.resource.data) || request.resource.data.customerLng is number) &&
+          (!('customerAddress' in request.resource.data) ||
+            (request.resource.data.customerAddress is string && request.resource.data.customerAddress.size() <= 300));
+        allow delete: if false;
+      }
+
       // ─── Messages (sub-collection per job) ───────────────────────────────
-      // An eligible artisan may also chat about a still-open job before
+      // Any registered artisan may also chat about a still-open job before
       // being matched ("interested" pre-quote chat) — same population that
-      // can already see the job via the read rule above.
+      // can already see the job via the read rule above (isArtisanAccount).
+      // Previously gated on isArtisanEligible() (approved+verified), which
+      // was a STRICTER bar than the job-read rule it was meant to mirror —
+      // an unverified artisan could see the job and a "Chat" button, then
+      // get permission-denied the moment they tried to actually send a
+      // message. Quoting/being matched still require full eligibility.
       match /messages/{msgId} {
+        // isAdmin() added for dashboard moderation/oversight — admin
+        // already has full read on /jobs, /disputes, /quotes, and delete
+        // on this very subcollection; read access is the same trust tier,
+        // just previously missing here. The admin UI only surfaces
+        // existence (Chat Exists: Yes/No), never message content, but the
+        // permission itself is what the rest of this app's admin model
+        // already grants everywhere else.
+        //
+        // Pre-match read is additionally scoped to sender/receiver: while a
+        // job is still 'requested', MULTIPLE artisans can each open
+        // "interested" chat with the same customer in the same thread.
+        // Without this scoping, any one of them could read every other
+        // artisan's private messages to that customer — a real cross-
+        // artisan privacy leak, not just a UI inconvenience. Once matched,
+        // isJobParty() already covers the full thread for the two parties.
         allow read: if isSignedIn() && jobExists(jobId) &&
           (isJobParty(getJob(jobId)) ||
-            (getJob(jobId).status == 'requested' && isArtisanEligible(request.auth.uid)));
+            (getJob(jobId).status == 'requested' && isArtisanAccount(request.auth.uid) &&
+              (resource.data.senderId == request.auth.uid ||
+               resource.data.receiverId == request.auth.uid)) ||
+            isAdmin());
         allow create: if isSignedIn() && jobExists(jobId) &&
           (isJobParty(getJob(jobId)) ||
-            (getJob(jobId).status == 'requested' && isArtisanEligible(request.auth.uid))) &&
+            // Pre-match create is pinned to the job's actual customer as
+            // receiver — an artisan can only ever message the customer on
+            // a still-open job, not some other artisan via this jobId.
+            (getJob(jobId).status == 'requested' && isArtisanAccount(request.auth.uid) &&
+              isNotSuspended(request.auth.uid) &&
+              request.resource.data.receiverId == getJob(jobId).customerId)) &&
           request.resource.data.senderId == request.auth.uid &&
-          request.resource.data.jobId == jobId;
+          request.resource.data.jobId == jobId &&
+          !isFreezingSuspended(request.auth.uid);
+        // Scoped to the message's own sender/receiver — previously any
+        // signed-in user could flip isRead on ANY message in ANY job's
+        // thread (no party check at all), letting a stranger tamper with
+        // someone else's read-state/unread badge. Matches the same
+        // sender/receiver scoping the read/create rules on this same
+        // subcollection already use.
         allow update: if isSignedIn() &&
+          (resource.data.senderId == request.auth.uid ||
+           resource.data.receiverId == request.auth.uid) &&
           request.resource.data.diff(resource.data).affectedKeys()
             .hasOnly(['isRead']);
         // Admin-only — used when an admin deletes a spam/fake job and
@@ -179,27 +547,42 @@ service cloud.firestore {
           isArtisanEligible(request.auth.uid) &&
           request.resource.data.status == 'pending' &&
           request.resource.data.amount is number &&
-          request.resource.data.amount > 0 &&
-          request.resource.data.artisanVerified == true;
+          request.resource.data.amount >= minJobValueNgn() &&
+          // Stage 5: the validity window is measured from server time.
+          request.resource.data.updatedAt == request.time &&
+          // Tied to real verification, not just eligibility — a beta
+          // tester is eligible to quote but must not claim the Verified
+          // badge. See isReallyVerified() above.
+          request.resource.data.artisanVerified == isReallyVerified(request.auth.uid);
 
         allow update: if isSignedIn() && (
           // Artisan edits price/duration/notes or withdraws while pending.
+          // Stage 5: an expired quote may be resubmitted (back to pending,
+          // which restarts its 48 h validity from server time).
           (resource.data.artisanId == request.auth.uid &&
-            resource.data.status == 'pending' &&
+            resource.data.status in ['pending', 'expired'] &&
             isArtisanEligible(request.auth.uid) &&
             request.resource.data.artisanId == resource.data.artisanId &&
             request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-              'amount', 'durationDays', 'notes', 'status', 'updatedAt',
+              'amount', 'laborCost', 'materialsCost', 'artisanTrustScore',
+              'durationDays', 'notes', 'status', 'updatedAt',
               'artisanName', 'artisanRating', 'artisanTrustTier',
               'artisanVerified', 'artisanProfileImageUrl'
             ]) &&
             request.resource.data.status in ['pending', 'withdrawn'] &&
-            request.resource.data.artisanVerified == true) ||
+            (request.resource.data.status == 'withdrawn' ||
+              (request.resource.data.amount is number && request.resource.data.amount >= minJobValueNgn())) &&
+            // Stage 5: an edit is a resubmission — it restarts the 48 h
+            // validity from server time.
+            request.resource.data.updatedAt == request.time &&
+            request.resource.data.artisanVerified == isReallyVerified(request.auth.uid)) ||
           // Customer (job owner) accepts/closes via JobService.acceptQuote,
           // or rejects a single quote directly — status-only change.
           (getJob(jobId).customerId == request.auth.uid &&
             request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']) &&
-            request.resource.data.status in ['accepted', 'closed', 'rejected'])
+            request.resource.data.status in ['accepted', 'closed', 'rejected'] &&
+            // Stage 5 (D5): a quote can only be accepted within its validity.
+            (request.resource.data.status != 'accepted' || _quoteStillValid(resource.data)))
         );
         allow delete: if false;
       }
@@ -208,37 +591,218 @@ service cloud.firestore {
     // An artisan may only be matched into a job while approved AND verified —
     // mirrors the discoverability gate on /artisans so the same eligibility
     // cannot be bypassed by hiring an artisan the client already knows about.
+    // betaTester (design/BETA_TESTING_GUIDE.md) is an admin-only-writable
+    // field — see artisans/{uid}'s update rule, which forbids the owner
+    // from touching it. It lets an admin let SPECIFIC, approved artisan
+    // accounts quote/be matched without completing real identity
+    // verification, for controlled beta testing — approvalStatus ==
+    // 'approved' (an admin has reviewed the account at all) is still
+    // required either way; only the verificationStatus half of the bar is
+    // bypassable, and only for accounts an admin explicitly flagged.
+    // Stage 5 (D5): a quote is valid for quoteValidityHours (default 48)
+    // from its last server-stamped (re)submission.
+    function _quoteStillValid(q) {
+      let at = q.get('updatedAt', q.get('createdAt', null));
+      return at is timestamp &&
+        request.time < at + duration.value(int(cfgNum('quoteValidityHours', 48)), 'h');
+    }
+
+    // Suspension (D9) added: a suspended artisan can neither quote nor be
+    // newly hired. Checked on both the artisans mirror (admin writes
+    // accountStatus there for artisans) and the authoritative users doc.
     function isArtisanEligible(artisanId) {
       let a = get(/databases/$(database)/documents/artisans/$(artisanId)).data;
       return a.approvalStatus == 'approved' &&
-        a.verificationStatus in ['id_verified', 'trusted'];
+        (a.verificationStatus in ['id_verified', 'trusted'] || a.get('betaTester', false) == true) &&
+        a.get('accountStatus', 'active') != 'suspended' &&
+        isNotSuspended(artisanId);
+    }
+
+    // Distinct from isArtisanEligible() above: this is real identity
+    // verification only, no beta bypass. Used to keep the quote document's
+    // own artisanVerified field (shown to customers as a trust badge)
+    // truthful — a beta tester's quote must never claim artisanVerified:
+    // true, since they have not actually completed identity verification.
+    function isReallyVerified(artisanId) {
+      let a = get(/databases/$(database)/documents/artisans/$(artisanId)).data;
+      return a.verificationStatus in ['id_verified', 'trusted'];
+    }
+
+    // Status transitions — Stage 2 rewrite (HT-001).
+    //
+    // Previously this validated ONLY (current status -> next status, actor)
+    // and never restricted which other fields the same write changed — and
+    // Firestore ORs `allow update` statements, so the field-scoped sub-state
+    // rules above did not constrain it. Any party making a legal transition
+    // could rewrite customerId/artisanId (artisan self-payout, HT-002),
+    // agreementStatus/agreedAmount (agreement bypass and price override,
+    // HT-003/HT-004) or autoReleaseAt (skip the customer's review window,
+    // HT-005). Every clause now whitelists exactly the keys JobService writes
+    // for that transition (plus the three consistency fields). customerId is
+    // in no list (immutable); artisanId only in requested->matched; payment,
+    // escrow, agreement and payout fields in none. Milestone timestamps must
+    // be server timestamps (== request.time).
+    // allowedKeys must list 'status', 'lastUpdatedAt', 'lastUpdatedBy',
+    // 'updateVersion' explicitly — written out per clause rather than via
+    // List.concat(), which measurably blew the 1000-expression budget.
+    function _transitionChanges(ck, allowedKeys) {
+      return ck.hasOnly(allowedKeys);
+    }
+
+    // Transitional (compat B-2, remove once every installed build is >= the
+    // Stage 2 release): older builds still write device-computed
+    // autoReleaseAt/disputeWindowEndsAt on submission. They are tolerated
+    // only inside a 13–15 day band from server time, so a backdated or past
+    // value is rejected outright; the onJobCompleted trigger then overwrites
+    // both from the server-stamped submittedAt, and _releaseEscrow re-checks
+    // submittedAt + 14d before paying, so the client value is never trusted.
+    function _timerWithinBand(ck, field) {
+      return !ck.hasAny([field]) ||
+        (request.resource.data[field] is timestamp &&
+          request.resource.data[field] > request.time + duration.value(13, 'd') &&
+          request.resource.data[field] < request.time + duration.value(15, 'd'));
+    }
+
+    // Milestone timestamps with no security role (matchedAt, startedAt,
+    // completedAt, cancelledAt): optional — so an older app build that
+    // omitted one still works — but if sent, must be the server time.
+    // submittedAt is NOT optional (it anchors the review window, HT-005).
+    function _serverTimeIfPresent(ck, field) {
+      return !ck.hasAny([field]) || request.resource.data[field] == request.time;
     }
 
     function _isValidJobTransition(jobId) {
-      let job = getJob(jobId);
+      let job = resource.data;
+      let nxtDoc = request.resource.data;
       let cur = job.status;
-      let nxt = request.resource.data.status;
+      let nxt = nxtDoc.status;
       let uid = request.auth.uid;
       let isCust = job.customerId == uid;
       // Artisan check: uid must match the already-stored artisanId (no free-assignment)
-      let isArt = job.artisanId == uid;
+      let isArt = job.get('artisanId', '') != '' && job.get('artisanId', '') == uid;
+      // Computed once — diff() is the expensive part of rule evaluation, and
+      // recomputing it per clause exhausted the 1000-expression budget.
+      let ck = nxtDoc.diff(job).affectedKeys();
 
-      return isAdmin() || (
+      // Stage 4: an admin CLIENT may only force-status an unfunded job, and
+      // never into a money state or with any other field — every funded
+      // outcome (refund, release, split, paid cancellation) goes through the
+      // audited, admin-checked Cloud Functions (adminResolveDispute,
+      // adminResolveCancellation). Previously isAdmin() allowed any write.
+      return (isAdmin() &&
+          ck.hasOnly(['status', 'adminOverrideReason', 'lastUpdatedAt', 'lastUpdatedBy', 'updateVersion']) &&
+          cur in ['requested', 'matched', 'inChat', 'paymentPending'] &&
+          nxt in ['requested', 'matched', 'inChat', 'cancelled']) || (
+        // Customer hires an eligible artisan (quote accept or direct hire).
+        // The customer may not hire their own artisan profile (dual-role
+        // self-dealing would let one person control both sides of escrow).
         (cur == 'requested'      && nxt == 'matched'        && isCust &&
-          request.resource.data.artisanId is string &&
-          request.resource.data.artisanId.size() > 0 &&
-          isArtisanEligible(request.resource.data.artisanId)) ||
-        (cur == 'matched'        && nxt == 'inChat'         && isCust) ||
-        (cur == 'inChat'         && nxt == 'paymentPending' && isCust) ||
-        (cur == 'paymentPending' && nxt == 'escrowLocked'   && (isAdmin() || isCust)) ||
-        (cur == 'escrowLocked'   && nxt == 'inProgress'     && isArt)  ||
-        (cur == 'inProgress'     && nxt == 'submitted'      && isArt)  ||
-        (cur == 'submitted'      && nxt == 'completed'      && isCust) ||
+          isNotSuspended(uid) &&
+          _transitionChanges(ck, ['status', 'lastUpdatedAt', 'lastUpdatedBy', 'updateVersion', 'artisanId', 'matchedAt',
+                              'bookingStatus', 'bookingRequestedAt']) &&
+          (!ck.hasAny(['bookingStatus']) || nxtDoc.bookingStatus == 'awaitingArtisan') &&
+          _serverTimeIfPresent(ck, 'bookingRequestedAt') &&
+          nxtDoc.artisanId is string &&
+          nxtDoc.artisanId.size() > 0 &&
+          nxtDoc.artisanId != uid &&
+          _serverTimeIfPresent(ck, 'matchedAt') &&
+          isArtisanEligible(nxtDoc.artisanId)) ||
+        // Stage 5 (D7, D5): matched is "awaiting the artisan's confirmation".
+        // The artisan confirms (-> inChat) within bookingConfirmationHours of
+        // the server-stamped match; a decline / expiry reopens the job
+        // server-side. The customer may only open chat on a booking the
+        // artisan already confirmed (legacy matched jobs are migrated).
+        (cur == 'matched'        && nxt == 'inChat'         && isArt &&
+          job.get('bookingStatus', 'awaitingArtisan') == 'awaitingArtisan' &&
+          _transitionChanges(ck, ['status', 'lastUpdatedAt', 'lastUpdatedBy', 'updateVersion', 'bookingStatus', 'bookingConfirmedAt']) &&
+          nxtDoc.bookingStatus == 'confirmed' &&
+          nxtDoc.bookingConfirmedAt == request.time &&
+          job.get('bookingRequestedAt', job.get('matchedAt', null)) is timestamp &&
+          request.time < job.get('bookingRequestedAt', job.get('matchedAt', null)) +
+            duration.value(int(cfgNum('bookingConfirmationHours', 24)), 'h') &&
+          !isFreezingSuspended(uid)) ||
+        (cur == 'matched'        && nxt == 'inChat'         && isCust &&
+          job.get('bookingStatus', '') == 'confirmed' &&
+          _transitionChanges(ck, ['status', 'lastUpdatedAt', 'lastUpdatedBy', 'updateVersion'])) ||
+        // Payment cannot begin until both parties have confirmed the
+        // agreement (Negotiation Completed checkpoint) — mirrors
+        // JobService.canInitPayment. Legacy jobs sitting at inChat before
+        // this field existed default to 'negotiating', so they're
+        // correctly blocked until run through the new confirm flow too.
+        // Payment also requires scheduling for jobs that need one — 'asap'
+        // jobs have nothing to schedule and are exempt, mirroring
+        // JobModel.schedulingSatisfied/JobService.canInitPayment exactly.
+        //
+        // agreedAmount is deliberately NOT in this clause's key list (HT-004):
+        // the price is frozen at the artisan's acceptance and is what
+        // initializePaystackTransaction charges. Older builds that re-send
+        // the same value still pass — an unchanged value is not an
+        // affectedKey (compat B-1).
+        (cur == 'inChat'         && nxt == 'paymentPending' && isCust &&
+          !isFreezingSuspended(uid) &&
+          _transitionChanges(ck, ['status', 'lastUpdatedAt', 'lastUpdatedBy', 'updateVersion']) &&
+          job.get('agreedAmount', 0) is number && job.get('agreedAmount', 0) > 0 &&
+          job.get('agreementStatus', 'negotiating') == 'confirmed' &&
+          (job.get('urgency', 'asap') != 'scheduled' ||
+            job.get('schedulingStatus', 'awaitingSchedule') == 'scheduled')) ||
+        // P0 remediation (design/P0_REMEDIATION_PLAN.md §4.2): previously
+        // also granted to isCust, which let a customer self-lock escrow
+        // with a fabricated paymentReference and zero real payment. This
+        // transition must only ever happen server-side, after a real
+        // Paystack charge is verified (_lockEscrow in functions/index.js,
+        // called from the webhook's charge.success handler and from
+        // verifyPayment) — both run under the Admin SDK, which bypasses
+        // these rules entirely regardless of this clause, so isAdmin()
+        // here is not "a human admin," it's simply "not an ordinary
+        // client write."
+        // (paymentPending -> escrowLocked and disputed -> resolved are covered
+        //  only by the isAdmin() short-circuit above.)
+        (cur == 'escrowLocked'   && nxt == 'inProgress'     && isArt &&
+          !isFreezingSuspended(uid) &&
+          _transitionChanges(ck, ['status', 'lastUpdatedAt', 'lastUpdatedBy', 'updateVersion', 'startedAt']) &&
+          _serverTimeIfPresent(ck, 'startedAt')) ||
+        // submittedAt must be the server time: it is what the review window
+        // (policy: 14 days, server-enforced) is measured from.
+        (cur == 'inProgress'     && nxt == 'submitted'      && isArt &&
+          !isFreezingSuspended(uid) &&
+          _transitionChanges(ck, ['status', 'lastUpdatedAt', 'lastUpdatedBy', 'updateVersion', 'completionImageUrls', 'beforePhotoUrls', 'artisanNotes',
+                              'submittedAt', 'autoReleaseAt', 'disputeWindowEndsAt']) &&
+          nxtDoc.submittedAt == request.time &&
+          nxtDoc.completionImageUrls is list && nxtDoc.completionImageUrls.size() > 0 &&
+          _timerWithinBand(ck, 'autoReleaseAt') &&
+          _timerWithinBand(ck, 'disputeWindowEndsAt')) ||
+        (cur == 'submitted'      && nxt == 'completed'      && isCust &&
+          !isFreezingSuspended(uid) &&
+          _transitionChanges(ck, ['status', 'lastUpdatedAt', 'lastUpdatedBy', 'updateVersion', 'completedAt']) &&
+          _serverTimeIfPresent(ck, 'completedAt')) ||
+        // Stage 5 (D4): exactly ONE rework request per job, with a reason,
+        // stamped with server time. The artisan's resubmission is the normal
+        // inProgress -> submitted transition, which restarts the 14-day
+        // window server-side (onJobCompleted). completed has no outbound
+        // transition at all, so a finished job can never be reopened.
+        (cur == 'submitted'      && nxt == 'inProgress'     && isCust &&
+          !isFreezingSuspended(uid) &&
+          job.get('reworkCount', 0) == 0 &&
+          _transitionChanges(ck, ['status', 'lastUpdatedAt', 'lastUpdatedBy', 'updateVersion', 'reworkCount', 'reworkReason', 'reworkRequestedAt']) &&
+          nxtDoc.reworkCount == 1 &&
+          nxtDoc.reworkReason is string &&
+          nxtDoc.reworkReason.size() >= 10 && nxtDoc.reworkReason.size() <= 1000 &&
+          nxtDoc.reworkRequestedAt == request.time) ||
         ((cur == 'escrowLocked' || cur == 'inProgress' || cur == 'submitted')
-                                 && nxt == 'disputed'       && isCust) ||
-        (cur == 'disputed'       && nxt == 'resolved'       && isAdmin()) ||
-        ((cur == 'requested' || cur == 'matched' || cur == 'inChat')
-                                 && nxt == 'cancelled'      && (isCust || isArt))
+                                 && nxt == 'disputed'       && (isCust || isArt) &&
+          _transitionChanges(ck, ['status', 'lastUpdatedAt', 'lastUpdatedBy', 'updateVersion', 'disputeReason']) &&
+          nxtDoc.disputeReason is string && nxtDoc.disputeReason.size() > 0) ||
+        // Unfunded jobs only, customer only (Stage 5, D6: an artisan withdrawal
+        // reopens the job via the artisanWithdrawFromJob function instead of
+        // killing it). escrowLocked was removed (policy D2, HT-006):
+        // once funds are held, neither party can cancel unilaterally — they
+        // file a cancellation request (rule above) for admin review instead.
+        ((cur == 'requested' || cur == 'matched' || cur == 'inChat' ||
+          cur == 'paymentPending')
+                                 && nxt == 'cancelled'      && isCust &&
+          _transitionChanges(ck, ['status', 'lastUpdatedAt', 'lastUpdatedBy', 'updateVersion', 'cancelledBy', 'cancellationReason', 'cancelledAt']) &&
+          (!ck.hasAny(['cancelledBy']) || nxtDoc.cancelledBy == uid) &&
+          _serverTimeIfPresent(ck, 'cancelledAt'))
       );
     }
 
@@ -249,19 +813,82 @@ service cloud.firestore {
         resource.data.artisanId == request.auth.uid ||
         isAdmin()
       );
-      allow create: if isSignedIn() &&
-        request.resource.data.payerId == request.auth.uid &&
-        request.resource.data.status in ['pending', 'escrowHeld'];
+      // P0 remediation (design/P0_REMEDIATION_PLAN.md §4.3): previously
+      // client-creatable by any signed-in user asserting their own
+      // payerId, with no job-ownership check, no amount validation, and
+      // status:'escrowHeld' (a value that should only ever be reachable
+      // after a real Paystack charge) directly settable on create. The
+      // real flow already creates this document entirely server-side —
+      // initializePaystackTransaction (functions/index.js, Admin SDK,
+      // which bypasses this rule regardless) — so there is no legitimate
+      // reason for a client-writable create path at all.
+      allow create: if false;
       allow update: if isAdmin();
       allow delete: if false;
     }
 
+    // ─── Escrow releases ────────────────────────────────────────────────────
+    // Previously had no match block at all (relied on default-deny by
+    // omission — the same class of gap admin_alerts had before it was
+    // fixed, see design/STITCH_ADMIN_AUDIT.md). Made explicit here per
+    // design/PAYOUT_RACE_CONDITION_AUDIT.md.
+    //
+    // JobService.confirmComplete (Dart, customer-manual release) writes
+    // here directly via the client SDK — it is NOT a Cloud Function — so
+    // this collection needs one real client-write rule, not `if false`
+    // outright. _releaseEscrow/processEscrowRelease (Cloud Functions,
+    // Admin SDK) bypass these rules entirely regardless of what's written
+    // here, and remain the only path that can ever transition a release
+    // past 'pending'.
+    //
+    // The payout-idempotency fix itself (one release document per job,
+    // fixed jobId-as-releaseId, atomic create-or-reject) lives in
+    // JobService.confirmComplete's transaction and in _releaseEscrow's
+    // mirrored transaction — this rule only adds the server-side backstop:
+    // even a compromised or buggy client cannot create a release for a
+    // job it doesn't own, under a different job's ID, or in any status
+    // other than the correct initial one.
+    match /escrow_releases/{releaseId} {
+      // read: isAdmin() rather than `if false` — this is also the sole
+      // read rule for the collection now that the duplicate block below
+      // has been removed (P0 remediation, see design/P0_REMEDIATION_PLAN.md
+      // §4.1); admin dashboard/ops visibility into stuck/failed releases.
+      allow read: if isAdmin();
+      // job.status == 'submitted' is the P0 fix: the previous version of
+      // this rule (and the now-deleted duplicate block a few hundred lines
+      // below) let a customer create a release document for their own job
+      // at ANY status — including immediately after inChat, with no
+      // payment ever having occurred. processEscrowRelease independently
+      // re-verifies this same precondition server-side (defense in depth —
+      // see functions/index.js) so a future rules regression alone cannot
+      // reopen the exploit, but this clause is the primary enforcement
+      // point and must not be removed.
+      // requestedBy must be the caller (HT-002): processEscrowRelease now
+      // only pays out when requestedBy equals the payment's server-recorded
+      // payerId (or 'system' for auto-release), so it must not be forgeable.
+      allow create: if isSignedIn() &&
+        releaseId == request.resource.data.jobId &&
+        getJob(request.resource.data.jobId).customerId == request.auth.uid &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.requestedBy == request.auth.uid &&
+        request.resource.data.keys().hasOnly(['jobId', 'requestedAt', 'status', 'requestedBy']) &&
+        !exists(/databases/$(database)/documents/settlements/$(releaseId)) &&
+        getJob(request.resource.data.jobId).status == 'submitted';
+      allow update, delete: if false; // status transitions past 'pending' are Cloud-Functions-only
+    }
+
     // ─── Reviews ────────────────────────────────────────────────────────────
     // Only allow reviews on completed jobs. Reviewer must be the customer.
+    // HT-014: reviewId must equal jobId (one review per job — a second
+    // create on the same ID is an update, which is denied) and the review
+    // must target the job's actual artisan. review_screen.dart already
+    // writes reviews/{jobId}, so the legitimate client is unaffected.
     match /reviews/{reviewId} {
       allow read: if isSignedIn();
       allow create: if isSignedIn() &&
+        reviewId == request.resource.data.jobId &&
         request.resource.data.customerId == request.auth.uid &&
+        request.resource.data.artisanId == getJob(request.resource.data.jobId).artisanId &&
         request.resource.data.rating is int &&
         request.resource.data.rating >= 1 &&
         request.resource.data.rating <= 5 &&
@@ -283,8 +910,11 @@ service cloud.firestore {
         request.resource.data.raisedBy == request.auth.uid &&
         request.resource.data.status == 'open' &&
         jobExists(request.resource.data.jobId) &&
-        getJob(request.resource.data.jobId).customerId == request.auth.uid &&
-        isJobParty(getJob(request.resource.data.jobId));
+        // Stage 5 (D3): customer OR artisan, always against the other party.
+        ((getJob(request.resource.data.jobId).customerId == request.auth.uid &&
+          request.resource.data.againstUserId == getJob(request.resource.data.jobId).artisanId) ||
+         (getJob(request.resource.data.jobId).artisanId == request.auth.uid &&
+          request.resource.data.againstUserId == getJob(request.resource.data.jobId).customerId));
       allow update: if isAdmin() ||
         (resource.data.againstUserId == request.auth.uid &&
           resource.data.status == 'open' &&
@@ -317,16 +947,6 @@ service cloud.firestore {
       allow write: if isOwner(uid);
     }
 
-    // ─── Escrow release queue (processed by Cloud Function) ─────────────────
-    match /escrow_releases/{id} {
-      allow read: if isAdmin();
-      allow create: if isSignedIn() &&
-        jobExists(request.resource.data.jobId) &&
-        getJob(request.resource.data.jobId).customerId == request.auth.uid;
-      allow update: if isAdmin();
-      allow delete: if false;
-    }
-
     // ─── Admins registry ────────────────────────────────────────────────────
     match /admins/{uid} {
       allow read:  if isAdmin();
@@ -357,29 +977,158 @@ service cloud.firestore {
     // and forced unread — this is not a general client-write escape hatch.
     match /notifications/{notifId} {
       allow read: if isOwner(resource.data.userId);
-      allow create: if isAdmin() ||
-        (isSignedIn() &&
-          request.resource.data.userId != request.auth.uid &&
-          request.resource.data.type in [
-            'quote_received', 'quote_accepted', 'quote_rejected', 'quote_withdrawn',
-            'dispute_raised', 'review_received'
-          ] &&
-          request.resource.data.isRead == false);
+      // HT-015 (interim — Stage 6 moves all generation server-side and sets
+      // client create to `if false`). Previously ANY signed-in user could
+      // send ANY user a whitelisted type with free text (e.g. a fake
+      // "Payment Released" push). Now a client notification must:
+      //   - be one of the types a client service actually sends (server-only
+      //     types job_status_update / verification_* / job_assigned /
+      //     appointment_scheduled removed — no client code sends them);
+      //   - reference a real job, and the sender→recipient pair must be a real
+      //     relationship on it: the two matched parties, an artisan writing
+      //     to the customer of a still-open job, or the customer writing to
+      //     an artisan who quoted on / is chatting about their open job;
+      //   - carry only the canonical NotificationService.payload keys.
+      // Residual risk (documented): a genuine counterparty can still choose
+      // the title/body text. Closed in Stage 6.
+      // Stage 6 (HT-015 final): notifications are generated server-side from
+      // the document change that caused them (functions/index.js). No
+      // ordinary client may create one, so a counterparty can no longer
+      // choose the title/body of a push either (Stage 2 residual risk).
+      // Admin clients keep create for VerificationService's in-transaction
+      // approval/rejection notice.
+      allow create: if isAdmin();
       allow update: if isOwner(resource.data.userId) &&
         request.resource.data.diff(resource.data).affectedKeys()
           .hasOnly(['isRead', 'readAt']);
       allow delete: if false;
     }
 
+    // ─── Account deletion requests ───────────────────────────────────────────
+    // User submits a deletion request for admin review. Non-destructive: the
+    // account is not deleted immediately. Admin resolves by updating status.
+    // User may also cancel (delete) their own pending request.
+    match /account_deletion_requests/{uid} {
+      allow read:   if isOwner(uid) || isAdmin();
+      allow create: if isOwner(uid) &&
+        request.resource.data.uid == uid &&
+        request.resource.data.status == 'pending';
+      allow update: if isAdmin() ||
+        (isOwner(uid) &&
+          resource.data.status == 'pending' &&
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['status']) &&
+          request.resource.data.status == 'cancelled');
+      allow delete: if isOwner(uid) || isAdmin();
+    }
+
     // ─── Artisan verifications (ID docs — admin review only) ─────────────────
+    // HT-020: the owner may only ever put their record into 'pending' or
+    // 'pending_later', and may never write reviewer fields — previously they
+    // could create it as 'approved', or flip a rejected record to
+    // 'approved', which the admin queue and verification status UI read.
     match /verifications/{uid} {
       allow read:  if isOwner(uid) || isAdmin();
-      allow create: if isOwner(uid);
+      allow create: if isOwner(uid) &&
+        request.resource.data.status in ['pending', 'pending_later'] &&
+        request.resource.data.get('reviewerId', null) == null &&
+        request.resource.data.get('reviewedAt', null) == null;
       // Artisan may resubmit if previously rejected, OR upgrade from a
       // "Verify Later" deferral (pending_later) to a real submission with
-      // documents. Admin may update freely.
+      // documents. Admin may update freely. Reviewer fields may only be
+      // left as they are or cleared by the owner, never set.
       allow update: if isAdmin() ||
-        (isOwner(uid) && resource.data.status in ['rejected', 'pending_later']);
+        (isOwner(uid) && resource.data.status in ['rejected', 'pending_later'] &&
+          request.resource.data.status in ['pending', 'pending_later'] &&
+          (!changedKeys().hasAny(['reviewerId']) || request.resource.data.reviewerId == null) &&
+          (!changedKeys().hasAny(['reviewedAt']) || request.resource.data.reviewedAt == null));
+      allow delete: if false;
+    }
+
+    // ─── Admin audit logs (top-level — governance actions) ──────────────────
+    // Written by AdminAuditLogService (client SDK, admin role) after each
+    // approval/rejection/suspension/deletion. Immutable once written.
+    match /admin_audit_logs/{logId} {
+      allow read:   if isAdmin();
+      allow create: if isAdmin() &&
+        request.resource.data.adminId == request.auth.uid &&
+        request.resource.data.action is string &&
+        request.resource.data.targetId is string;
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // ─── Portfolio projects (top-level) ─────────────────────────────────────
+    // Artisan owns their project documents — create/update/delete restricted
+    // to the artisan whose uid matches artisanId. Any signed-in user can read
+    // (drives the profile screen projects section for all visitors).
+    match /portfolio_projects/{projectId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() &&
+        request.resource.data.artisanId == request.auth.uid &&
+        isArtisanAccount(request.auth.uid) &&
+        request.resource.data.title is string &&
+        request.resource.data.title.size() > 0;
+      allow update: if isSignedIn() &&
+        resource.data.artisanId == request.auth.uid &&
+        request.resource.data.artisanId == resource.data.artisanId;
+      allow delete: if isSignedIn() &&
+        resource.data.artisanId == request.auth.uid;
+    }
+
+    // ─── Stage 4 financial records (Admin SDK write only) ─────────────────
+    // Refund lifecycle, dispute/cancellation settlements and the append-only
+    // financial event log. Customers see refund progress through their own
+    // payment/job documents (refundStatus), never these records directly.
+    match /refunds/{refundId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+    match /settlements/{jobId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+    match /financial_events/{eventId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+    // Stage 7.2: losses HandyTrust absorbs (chargebacks after payout) and the
+    // immutable booking request/response records behind the response-time
+    // trust input. Server-written only.
+    match /platform_losses/{chargebackId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+    match /booking_responses/{responseId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+    // Stage 7.1 (F-1): chargeback cases and their raw event log.
+    match /chargebacks/{disputeId} {
+      allow read: if isAdmin();
+      allow write: if false;
+      match /events/{eventKey} {
+        allow read: if isAdmin();
+        allow write: if false;
+      }
+    }
+
+    // ─── Admin alerts ──────────────────────────────────────────────────────
+    // Written exclusively by Cloud Functions (Admin SDK, bypasses these
+    // rules) — reconcileStuckEscrowReleases and _alertAdminDispute in
+    // functions/index.js. Until this rule existed, the collection had NO
+    // match block at all, so under Firestore's default-deny model it was
+    // completely unreadable from the app — a real operational stuck-payout/
+    // dispute-escalation feed that no admin could ever see. See
+    // design/STITCH_ADMIN_AUDIT.md. Update is scoped to exactly the one
+    // field both writers set (`resolved`) plus an audit trail pair, so an
+    // admin can dismiss an alert without being able to rewrite its content.
+    match /admin_alerts/{alertId} {
+      allow read: if isAdmin();
+      allow update: if isAdmin() &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['resolved', 'resolvedAt', 'resolvedBy']);
+      allow create: if false; // Cloud Functions only (Admin SDK)
       allow delete: if false;
     }
 

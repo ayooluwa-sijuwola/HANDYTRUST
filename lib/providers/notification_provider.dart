@@ -1,10 +1,12 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter/foundation.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/services/notification_service.dart';
 import '../firebase/messaging/local_notification_service.dart';
 import '../models/notification_model.dart';
 import 'auth_provider.dart';
+import 'package:flutter/material.dart';
+import '../routes/router.dart';
 
 final notificationServiceProvider = Provider<NotificationService>(
   (ref) => NotificationService(FirebaseFirestore.instance),
@@ -64,7 +66,14 @@ final notificationInitProvider = Provider<void>((ref) {
       await service.requestPermission();
       final token = await service.getToken();
       if (token != null) {
-        await _saveFcmToken(firestore, user.uid, token);
+        try {
+          await _saveFcmToken(firestore, user.uid, token);
+          debugPrint('[notificationInitProvider] saved FCM token for ${user.uid}');
+        } catch (e) {
+          debugPrint('[notificationInitProvider] failed to save token: $e');
+        }
+      } else {
+        debugPrint('[notificationInitProvider] no FCM token available for ${user.uid}');
       }
     } catch (e) {
       debugPrint('[notificationInitProvider] token registration failed: $e');
@@ -75,10 +84,59 @@ final notificationInitProvider = Provider<void>((ref) {
 
   // Re-register whenever the FCM token rotates
   final sub = service.onTokenRefresh.listen((newToken) {
-    _saveFcmToken(firestore, user.uid, newToken).catchError(
-      (e) => debugPrint('[notificationInitProvider] token refresh save failed: $e'),
-    );
+    _saveFcmToken(firestore, user.uid, newToken).then((_) {
+      debugPrint('[notificationInitProvider] refreshed FCM token saved for ${user.uid}');
+    }).catchError((e) {
+      debugPrint('[notificationInitProvider] token refresh save failed: $e');
+    });
+  });
+
+  // Handle when a notification is tapped (app opened from terminated/background)
+  // and deep-link to the route if available.
+  try {
+    // If app opened from a terminated state via a notification
+    FirebaseMessaging.instance.getInitialMessage().then((message) {
+      if (message != null) {
+        final route = routeFromMessage(message);
+        if (route != null) {
+          debugPrint('[notificationInitProvider] initialMessage deep-link: $route');
+          // Stage 6 (HT-026): navigate through GoRouter. The previous
+          // Navigator.pushNamed had no route table under GoRouter, so it
+          // threw (caught and logged) and taps never navigated.
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            ref.read(routerProvider).push(safeNotificationRoute(route));
+          });
+        }
+      }
+    });
+  } catch (e) {
+    debugPrint('[notificationInitProvider] getInitialMessage failed: $e');
+  }
+
+  // When the app is in background and user taps the notification
+  FirebaseMessaging.onMessageOpenedApp.listen((message) {
+    try {
+      final route = routeFromMessage(message);
+      if (route != null) {
+        debugPrint('[notificationInitProvider] onMessageOpenedApp deep-link: $route');
+        ref.read(routerProvider).push(safeNotificationRoute(route));
+      }
+    } catch (e) {
+      debugPrint('[notificationInitProvider] onMessageOpenedApp handler failed: $e');
+    }
   });
 
   ref.onDispose(sub.cancel);
 });
+
+
+/// Stage 6 (HT-026): only in-app paths are followed from a notification
+/// payload — anything else (absolute URLs, empty or malformed values) falls
+/// back to the notifications list, so a payload can never send the app
+/// somewhere unexpected.
+String safeNotificationRoute(String? route) {
+  if (route == null || route.isEmpty) return '/notifications';
+  if (!route.startsWith('/') || route.startsWith('//') || route.contains('://')) return '/notifications';
+  const allowedPrefixes = ['/job/', '/chat/', '/dispute/', '/notifications', '/jobs', '/wallet', '/home'];
+  return allowedPrefixes.any(route.startsWith) ? route : '/notifications';
+}

@@ -20,7 +20,10 @@ class JobCompletionScreen extends ConsumerStatefulWidget {
 }
 
 class _JobCompletionScreenState extends ConsumerState<JobCompletionScreen> {
-  final List<Uint8List> _images = [];
+  // Photos taken on arrival, before work starts
+  final List<Uint8List> _beforeImages = [];
+  // Photos of the completed work
+  final List<Uint8List> _afterImages = [];
   final _notesController = TextEditingController();
   bool _uploading = false;
   String? _error;
@@ -43,12 +46,36 @@ class _JobCompletionScreenState extends ConsumerState<JobCompletionScreen> {
           children: [
             _infoCard(),
             const SizedBox(height: 24),
-            const Text('Completion Photos *',
-                style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                  fontFamily: 'Inter',
-                )),
+            // ── Before photos ──────────────────────────────────────
+            const Text(
+              'Arrival Photos (Before Work) *',
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                fontFamily: 'Inter',
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Take at least 1 photo when you arrive, before starting work.',
+              style: TextStyle(
+                fontSize: 13,
+                color: context.colors.textSecondary,
+                fontFamily: 'Inter',
+              ),
+            ),
+            const SizedBox(height: 12),
+            _imageGrid(_beforeImages, onAdd: () => _pickImage(_beforeImages)),
+            const SizedBox(height: 24),
+            // ── After photos ───────────────────────────────────────
+            const Text(
+              'Completion Photos (After Work) *',
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                fontFamily: 'Inter',
+              ),
+            ),
             const SizedBox(height: 4),
             Text(
               'Upload at least 1 photo of the completed work.',
@@ -59,14 +86,16 @@ class _JobCompletionScreenState extends ConsumerState<JobCompletionScreen> {
               ),
             ),
             const SizedBox(height: 12),
-            _imageGrid(),
+            _imageGrid(_afterImages, onAdd: () => _pickImage(_afterImages)),
             const SizedBox(height: 24),
-            const Text('Notes (optional)',
-                style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                  fontFamily: 'Inter',
-                )),
+            const Text(
+              'Notes (optional)',
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                fontFamily: 'Inter',
+              ),
+            ),
             const SizedBox(height: 8),
             TextField(
               controller: _notesController,
@@ -109,10 +138,11 @@ class _JobCompletionScreenState extends ConsumerState<JobCompletionScreen> {
           children: [
             Icon(Icons.info_outline_rounded,
                 size: 18, color: context.colors.primary),
-            SizedBox(width: 10),
+            const SizedBox(width: 10),
             Expanded(
               child: Text(
-                'Once submitted, the customer has 7 days to confirm completion or raise a dispute. Funds release automatically after the 7-day window.',
+                'Upload arrival photos (before work) and completion photos (after work). '
+                'The customer then has 14 days to confirm or raise a dispute.',
                 style: TextStyle(
                   fontSize: 12,
                   color: context.colors.primary,
@@ -125,7 +155,8 @@ class _JobCompletionScreenState extends ConsumerState<JobCompletionScreen> {
         ),
       );
 
-  Widget _imageGrid() => GridView.builder(
+  Widget _imageGrid(List<Uint8List> images, {required VoidCallback onAdd}) =>
+      GridView.builder(
         shrinkWrap: true,
         physics: const NeverScrollableScrollPhysics(),
         gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
@@ -133,17 +164,18 @@ class _JobCompletionScreenState extends ConsumerState<JobCompletionScreen> {
           crossAxisSpacing: 8,
           mainAxisSpacing: 8,
         ),
-        itemCount: _images.length + 1,
+        itemCount: images.length + 1,
         itemBuilder: (ctx, i) {
-          if (i == _images.length) {
+          if (i == images.length) {
             return GestureDetector(
-              onTap: _pickImage,
+              onTap: onAdd,
               child: Container(
                 decoration: BoxDecoration(
                   color: context.colors.surfaceVariant,
                   borderRadius: BorderRadius.circular(8),
                   border: Border.all(
-                      color: context.colors.border, style: BorderStyle.solid),
+                      color: context.colors.border,
+                      style: BorderStyle.solid),
                 ),
                 child: Center(
                   child: Icon(Icons.add_photo_alternate_outlined,
@@ -157,13 +189,13 @@ class _JobCompletionScreenState extends ConsumerState<JobCompletionScreen> {
             children: [
               ClipRRect(
                 borderRadius: BorderRadius.circular(8),
-                child: Image.memory(_images[i], fit: BoxFit.cover),
+                child: Image.memory(images[i], fit: BoxFit.cover),
               ),
               Positioned(
                 top: 4,
                 right: 4,
                 child: GestureDetector(
-                  onTap: () => setState(() => _images.removeAt(i)),
+                  onTap: () => setState(() => images.removeAt(i)),
                   child: Container(
                     padding: const EdgeInsets.all(2),
                     decoration: BoxDecoration(
@@ -180,7 +212,7 @@ class _JobCompletionScreenState extends ConsumerState<JobCompletionScreen> {
         },
       );
 
-  Future<void> _pickImage() async {
+  Future<void> _pickImage(List<Uint8List> target) async {
     final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
     if (picked == null) return;
     final raw = await picked.readAsBytes();
@@ -190,12 +222,18 @@ class _JobCompletionScreenState extends ConsumerState<JobCompletionScreen> {
           await FlutterImageCompress.compressWithList(raw, quality: 70);
       bytes = Uint8List.fromList(compressed);
     }
-    setState(() => _images.add(bytes));
+    setState(() => target.add(bytes));
   }
 
   Future<void> _submit() async {
-    if (_images.isEmpty) {
-      setState(() => _error = 'Please add at least one completion photo.');
+    if (_beforeImages.isEmpty) {
+      setState(
+          () => _error = 'Please add at least one arrival photo (before work).');
+      return;
+    }
+    if (_afterImages.isEmpty) {
+      setState(
+          () => _error = 'Please add at least one completion photo (after work).');
       return;
     }
     final userId = ref.read(authStateChangesProvider).value?.uid ?? '';
@@ -210,26 +248,54 @@ class _JobCompletionScreenState extends ConsumerState<JobCompletionScreen> {
 
     try {
       final storage = StorageService();
-      final urls = <String>[];
-      for (int i = 0; i < _images.length; i++) {
+
+      // Upload before photos
+      final beforeUrls = <String>[];
+      for (int i = 0; i < _beforeImages.length; i++) {
         final url = await storage.uploadJobImageBytes(
           jobId: widget.jobId,
           userId: userId,
           index: i,
-          bytes: _images[i],
+          bytes: _beforeImages[i],
+          subfolder: 'before',
         );
-        urls.add(url);
+        beforeUrls.add(url);
+      }
+
+      // Upload after photos
+      final afterUrls = <String>[];
+      for (int i = 0; i < _afterImages.length; i++) {
+        final url = await storage.uploadJobImageBytes(
+          jobId: widget.jobId,
+          userId: userId,
+          index: i,
+          bytes: _afterImages[i],
+          subfolder: 'after',
+        );
+        afterUrls.add(url);
       }
 
       await ref.read(escrowNotifierProvider.notifier).submitCompletion(
             widget.jobId,
-            imageUrls: urls,
+            imageUrls: afterUrls,
+            beforePhotoUrls: beforeUrls,
             notes: _notesController.text.trim().isEmpty
                 ? null
                 : _notesController.text.trim(),
           );
 
-      if (mounted) context.go('/job/${widget.jobId}');
+      // Prefer popping back to the job detail screen that pushed this one
+      // (from job_detail_screen.dart or all_jobs_screen.dart, both use
+      // context.push) — preserves its state and the rest of the
+      // navigation stack, so Android system back keeps working correctly.
+      // go() is kept only as a fallback if there's nothing to pop.
+      if (mounted) {
+        if (context.canPop()) {
+          context.pop();
+        } else {
+          context.go('/job/${widget.jobId}');
+        }
+      }
     } catch (e) {
       setState(() => _error = e.toString());
     } finally {

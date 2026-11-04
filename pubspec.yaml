@@ -17,13 +17,17 @@ dependencies:
   # Navigation
   go_router: ^13.0.0
 
-  # Firebase
-  firebase_core: ^2.13.0
-  firebase_auth: ^4.16.0
-  cloud_firestore: ^4.9.0
-  firebase_storage: ^11.0.0
-  firebase_messaging: ^14.0.0
-  cloud_functions: ^4.6.0
+  # Firebase — upgraded together as one interconnected group (see
+  # design/V2_FIREBASE_WEBKIT_UPGRADE_REPORT.md) specifically to pull in
+  # firebase_core_web >=3.10.0, whose changelog fixes exactly the WebKit
+  # "load firebase-app.js before component bundles to avoid WebKit import
+  # race" bug this upgrade targets.
+  firebase_core: ^4.13.0
+  firebase_auth: ^6.5.7
+  cloud_firestore: ^6.8.0
+  firebase_storage: ^13.4.6
+  firebase_messaging: ^16.5.0
+  cloud_functions: ^6.3.6
 
   # Networking
   dio: ^5.9.2
@@ -49,6 +53,7 @@ dependencies:
   shimmer: ^3.0.0
   flutter_animate: ^4.5.0
   lottie: ^3.1.2
+  fl_chart: ^0.69.0
 
   # Utilities
   intl: ^0.20.2
@@ -65,12 +70,22 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.13.1
+  # Stage 7.1: test-only — builds JPEGs with GPS EXIF (already locked transitively).
+  image: ^4.8.0
+
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/icons/watermark-removed-WhatsApp Image 2026-08-03 at 13.55.31.jpg"
 
 flutter:
   uses-material-design: true
   assets:
     - assets/
     - assets/images/
+    - assets/icons/
   fonts:
     - family: Inter
       fonts:

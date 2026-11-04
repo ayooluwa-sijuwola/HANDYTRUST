@@ -1,6 +1,8 @@
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import '../core/services/trust_score_service.dart';
 import '../models/artisan_model.dart';
+import '../theme/app_design_system.dart';
 import '../theme/app_theme.dart';
 import 'star_rating.dart';
 import 'trust_score_card.dart';
@@ -18,33 +20,29 @@ class ArtisanCard extends StatelessWidget {
       child: Container(
         decoration: BoxDecoration(
           color: context.colors.surface,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: context.colors.borderLight),
-          boxShadow: const [
-            BoxShadow(
-              color: Color(0x08000000),
-              blurRadius: 8,
-              offset: Offset(0, 2),
-            ),
-          ],
+          borderRadius: BorderRadius.circular(AppRadius.xl),
+          border: Border.all(color: context.colors.border),
+          boxShadow: Theme.of(context).brightness == Brightness.dark
+              ? AppShadows.cardDark
+              : AppShadows.card,
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // Avatar / image
             Stack(
               children: [
                 ClipRRect(
-                  borderRadius:
-                      const BorderRadius.vertical(top: Radius.circular(16)),
+                  borderRadius: const BorderRadius.vertical(
+                      top: Radius.circular(AppRadius.xl)),
                   child: artisan.profileImageUrl != null
-                      ? Image.network(
-                          artisan.profileImageUrl!,
+                      ? CachedNetworkImage(
+                          imageUrl: artisan.profileImageUrl!,
                           height: 130,
                           width: double.infinity,
                           fit: BoxFit.cover,
-                          loadingBuilder: (_, child, progress) =>
-                              progress == null ? child : _avatarPlaceholder(context),
-                          errorBuilder: (_, error, stack) => _avatarPlaceholder(context),
+                          placeholder: (ctx, url) => _avatarPlaceholder(context),
+                          errorWidget: (ctx, url, err) => _avatarPlaceholder(context),
                         )
                       : _avatarPlaceholder(context),
                 ),
@@ -52,15 +50,21 @@ class ArtisanCard extends StatelessWidget {
                   Positioned(
                     top: 8,
                     left: 8,
-                    child: _badge('Rising Pro', context.colors.risingBadge,
-                        context.colors.risingBadgeSurface),
+                    child: _badge(
+                      '⭐ Rising Pro',
+                      context.colors.risingBadge,
+                      context.colors.risingBadgeSurface,
+                    ),
                   ),
                 if (artisan.isVerified)
                   Positioned(
                     top: 8,
                     right: 8,
-                    child: _badge('Verified', context.colors.accent,
-                        context.colors.accentSurface),
+                    child: _badge(
+                      '✓ Verified',
+                      context.colors.primary,
+                      context.colors.primarySurface,
+                    ),
                   ),
                 if (trustTierBadge(context, artisan.trustTier) != null)
                   Positioned(
@@ -70,8 +74,10 @@ class ArtisanCard extends StatelessWidget {
                   ),
               ],
             ),
+
+            // Info section
             Padding(
-              padding: const EdgeInsets.all(12),
+              padding: const EdgeInsets.all(14),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -82,7 +88,7 @@ class ArtisanCard extends StatelessWidget {
                           artisan.displayName,
                           style: TextStyle(
                             fontSize: 14,
-                            fontWeight: FontWeight.w600,
+                            fontWeight: FontWeight.w700,
                             color: context.colors.textPrimary,
                             fontFamily: 'Inter',
                           ),
@@ -93,7 +99,8 @@ class ArtisanCard extends StatelessWidget {
                       if (artisan.accountType == 'business') ...[
                         const SizedBox(width: 4),
                         Icon(Icons.storefront_outlined,
-                            size: 14, color: context.colors.textTertiary),
+                            size: 14,
+                            color: context.colors.textTertiary),
                       ],
                     ],
                   ),
@@ -108,12 +115,13 @@ class ArtisanCard extends StatelessWidget {
                   ),
                   const SizedBox(height: 8),
                   StarRating(rating: artisan.rating, size: 13),
-                  const SizedBox(height: 4),
+                  const SizedBox(height: 6),
                   Row(
                     children: [
                       Icon(Icons.work_outline_rounded,
-                          size: 12, color: context.colors.textTertiary),
-                      const SizedBox(width: 3),
+                          size: 12,
+                          color: context.colors.textTertiary),
+                      const SizedBox(width: 4),
                       Text(
                         '${artisan.completedJobs} jobs',
                         style: TextStyle(
@@ -125,8 +133,9 @@ class ArtisanCard extends StatelessWidget {
                       if (artisan.location != null) ...[
                         const SizedBox(width: 8),
                         Icon(Icons.location_on_outlined,
-                            size: 12, color: context.colors.textTertiary),
-                        const SizedBox(width: 3),
+                            size: 12,
+                            color: context.colors.textTertiary),
+                        const SizedBox(width: 2),
                         Expanded(
                           child: Text(
                             artisan.location!,
@@ -143,30 +152,33 @@ class ArtisanCard extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 6),
-                  Row(
-                    children: [
-                      Icon(Icons.verified_outlined,
-                          size: 12, color: context.colors.primary),
-                      const SizedBox(width: 3),
-                      Text(
-                        'Trust ${artisan.trustScore.toStringAsFixed(0)}/100',
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: context.colors.primary,
-                          fontFamily: 'Inter',
+                  // Trust score chip
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: context.colors.primarySurface,
+                      borderRadius:
+                          BorderRadius.circular(AppRadius.full),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.verified_outlined,
+                            size: 11,
+                            color: context.colors.primary),
+                        const SizedBox(width: 4),
+                        Text(
+                          'Trust ${artisan.trustScore.toStringAsFixed(0)}/100 · ${TrustScoreService.tierLabel(artisan.trustScore)}',
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                            color: context.colors.primary,
+                            fontFamily: 'Inter',
+                          ),
                         ),
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
-                        '· ${TrustScoreService.tierLabel(artisan.trustScore)}',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: context.colors.textTertiary,
-                          fontFamily: 'Inter',
-                        ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ],
               ),
@@ -188,7 +200,7 @@ class ArtisanCard extends StatelessWidget {
                 : '?',
             style: TextStyle(
               fontSize: 40,
-              fontWeight: FontWeight.w700,
+              fontWeight: FontWeight.w800,
               color: context.colors.primary,
               fontFamily: 'Inter',
             ),
@@ -197,10 +209,11 @@ class ArtisanCard extends StatelessWidget {
       );
 
   Widget _badge(String label, Color fg, Color bg) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        padding:
+            const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         decoration: BoxDecoration(
           color: bg,
-          borderRadius: BorderRadius.circular(20),
+          borderRadius: BorderRadius.circular(AppRadius.full),
         ),
         child: Text(
           label,

@@ -5,6 +5,8 @@ import 'package:go_router/go_router.dart';
 import '../../core/constants/service_categories.dart';
 import '../../providers/auth_provider.dart';
 import '../../theme/app_theme.dart';
+import '../../widgets/auth_scaffold.dart';
+import '../../widgets/web_content_wrapper.dart';
 
 /// Step 2 of artisan onboarding: professional details.
 /// Reached after email verification when the user's role includes 'artisan'.
@@ -109,7 +111,9 @@ class _ArtisanRegistrationScreenState extends ConsumerState<ArtisanRegistrationS
         title: const Text('Set up your artisan profile'),
       ),
       body: SafeArea(
-        child: SingleChildScrollView(
+        child: WebContentWrapper(
+          maxWidth: 640,
+          child: SingleChildScrollView(
           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
           child: Form(
             key: _formKey,
@@ -202,20 +206,16 @@ class _ArtisanRegistrationScreenState extends ConsumerState<ArtisanRegistrationS
                 ),
                 const SizedBox(height: 32),
 
-                ElevatedButton(
-                  onPressed: _isSaving ? null : _save,
-                  child: _isSaving
-                      ? const SizedBox(
-                          height: 20,
-                          width: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                        )
-                      : const Text('Submit for review'),
+                AuthButton(
+                  label: 'Submit for review',
+                  loading: _isSaving,
+                  onPressed: _save,
                 ),
                 const SizedBox(height: 24),
               ],
             ),
           ),
+        ),
         ),
       ),
     );

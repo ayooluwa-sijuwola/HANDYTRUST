@@ -4,7 +4,6 @@ import '../../models/dispute_model.dart';
 import '../../models/job_mutation_context.dart';
 import '../utils/safe_firestore.dart';
 import 'job_service.dart';
-import 'notification_service.dart';
 
 /// Write layer for the dispute domain.
 ///
@@ -18,10 +17,8 @@ import 'notification_service.dart';
 class DisputeService {
   final FirebaseFirestore _db;
   final JobService _jobService;
-  final NotificationService _notifications;
 
-  DisputeService(this._db, this._jobService)
-      : _notifications = NotificationService(_db);
+  DisputeService(this._db, this._jobService);
 
   CollectionReference<Map<String, dynamic>> get _disputesCol =>
       _db.collection('disputes');
@@ -31,38 +28,35 @@ class DisputeService {
   /// this, upload, then pass the same ID into [raiseDispute].
   String newDisputeId() => _disputesCol.doc().id;
 
-  /// Customer raises a dispute against the assigned artisan.
+  /// Either party raises a dispute against the other (Stage 5, policy D3 —
+  /// previously customer-only). firestore.rules require [againstUserId] to
+  /// be the other party on the job.
   Future<void> raiseDispute({
     required String disputeId,
     required String jobId,
-    required String customerId,
-    required String artisanId,
+    required String raisedBy,
+    required String againstUserId,
+    required bool raisedByCustomer,
     required String reason,
     List<String> evidenceImageUrls = const [],
   }) async {
     final disputeRef = _disputesCol.doc(disputeId);
-    final ctx = JobMutationContext.customer(
-      uid: customerId,
-      actionType: JobActionType.disputeRaised,
-      reason: reason,
-    );
+    final ctx = raisedByCustomer
+        ? JobMutationContext.customer(uid: raisedBy, actionType: JobActionType.disputeRaised, reason: reason)
+        : JobMutationContext.artisan(uid: raisedBy, actionType: JobActionType.disputeRaised, reason: reason);
 
     await _jobService.raiseDisputeWithRecord(
       ctx,
       jobId,
       disputeId: disputeRef.id,
       reason: reason,
-      againstUserId: artisanId,
+      againstUserId: againstUserId,
       evidenceImageUrls: evidenceImageUrls,
     );
 
-    await _notifications.send(
-      userId: artisanId,
-      type: 'dispute_raised',
-      title: 'A dispute was raised',
-      body: 'The customer raised a dispute on a job. Respond with your side within 14 days.',
-      jobId: jobId,
-    );
+    // Stage 6 (HT-015): this notification is generated server-side from the
+    // underlying document change (functions/index.js); clients can no longer
+    // create notifications.
   }
 
   /// Against-party (artisan) responds with their side and evidence.
@@ -82,6 +76,12 @@ class DisputeService {
   }
 
   /// Admin resolves (or dismisses) a dispute.
+  ///
+  /// Superseded in Stage 4: this wrote a status-only resolution with no money
+  /// outcome (HT-007), and firestore.rules now refuse an admin client moving a
+  /// funded job to 'resolved'. Use AdminFinanceService.resolveDispute, which
+  /// calls the audited adminResolveDispute Cloud Function.
+  @Deprecated('Use AdminFinanceService.resolveDispute (adminResolveDispute callable).')
   Future<void> resolveDispute({
     required String jobId,
     required String disputeId,
@@ -107,15 +107,9 @@ class DisputeService {
       dismiss: dismiss,
     );
 
-    for (final userId in {raisedBy, againstUserId}) {
-      await _notifications.send(
-        userId: userId,
-        type: 'dispute_resolved',
-        title: dismiss ? 'Dispute Dismissed' : 'Dispute Resolved',
-        body: resolution,
-        jobId: jobId,
-      );
-    }
+    // Stage 6 (HT-015): this notification is generated server-side from the
+    // underlying document change (functions/index.js); clients can no longer
+    // create notifications.
   }
 
   /// The single dispute record for a job, if one exists.

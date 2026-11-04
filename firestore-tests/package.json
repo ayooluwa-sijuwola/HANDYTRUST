@@ -1,0 +1,12 @@
+{
+  "name": "handytrust-firestore-rules-tests",
+  "private": true,
+  "description": "Firestore Security Rules regression tests, run against the local Firestore emulator only. Never touches production Firestore or Paystack — see design/P0_REMEDIATION_PLAN.md §7.",
+  "scripts": {
+    "test": "node --test escrow_payout.test.js security_regression.test.js",
+    "test:storage": "node --test storage_rules.test.js"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^3.0.4"
+  }
+}

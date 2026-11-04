@@ -26,6 +26,12 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>HandyTrust needs camera access so you can take a selfie and photograph your government ID for identity verification, and to attach photos to jobs.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>HandyTrust needs photo library access so you can choose an existing photo of your government ID, portfolio work, or job details.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>HandyTrust uses your location to pre-fill your job address and match you with nearby artisans. You can always enter your address manually instead.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

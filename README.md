@@ -63,7 +63,7 @@ flowchart TB
         Firestore["Cloud Firestore"]
         Storage["Firebase Storage"]
         FCM["Firebase Cloud Messaging"]
-        Functions["Cloud Functions (Node 20, v2 SDK)"]
+        Functions["Cloud Functions (Node 22, v2 SDK)"]
     end
 
     subgraph External["External APIs"]
@@ -177,7 +177,7 @@ _No screenshots are currently committed to this repository (no `screenshots/` di
 | UI/animation | `google_fonts`, `shimmer`, `flutter_animate`, `lottie` |
 | Notifications | `flutter_local_notifications` |
 | Utilities | `intl`, `uuid`, `timeago`, `permission_handler`, `connectivity_plus`, `shared_preferences` |
-| Cloud Functions runtime | Node.js 20, `firebase-functions` v5, `firebase-admin`, `axios`, `@google/generative-ai` |
+| Cloud Functions runtime | Node.js 22, `firebase-functions` v5, `firebase-admin`, `axios`, `@google/generative-ai` |
 
 ## Project Structure
 
@@ -273,7 +273,7 @@ firebase.json                # project/emulator config
 ### Prerequisites
 - Flutter SDK (Dart `^3.11.4`)
 - Firebase CLI (`npm install -g firebase-tools`) and, if targeting a new Firebase project, the FlutterFire CLI
-- Node.js 20 (for Cloud Functions)
+- Node.js 22 (for Cloud Functions)
 - A Firebase project on the **Blaze plan** (required — see Known Limitations)
 
 ### 1. Install Flutter dependencies

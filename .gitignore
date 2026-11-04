@@ -43,3 +43,11 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Stage 7.1: local Functions secrets (emulator/test keys) must never be committed.
+functions/.secret.local
+functions/.env.local
+
+# Dependencies and local Firebase deploy cache (never commit).
+node_modules/
+.firebase/

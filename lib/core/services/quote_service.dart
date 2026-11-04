@@ -1,10 +1,10 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'artisan_eligibility.dart';
 import '../../models/artisan_model.dart';
 import '../../models/job_mutation_context.dart';
 import '../../models/quote_model.dart';
 import '../utils/safe_firestore.dart';
 import 'job_service.dart';
-import 'notification_service.dart';
 
 /// Write layer for the quote marketplace domain.
 ///
@@ -16,9 +16,7 @@ import 'notification_service.dart';
 class QuoteService {
   final FirebaseFirestore _db;
   final JobService _jobService;
-  final NotificationService _notifications;
-
-  QuoteService(this._db, this._jobService) : _notifications = NotificationService(_db);
+  QuoteService(this._db, this._jobService);
 
   CollectionReference<Map<String, dynamic>> _quotesCol(String jobId) =>
       _db.collection('jobs').doc(jobId).collection('quotes');
@@ -27,10 +25,13 @@ class QuoteService {
       _quotesCol(jobId).doc(artisanId);
 
   /// Submits a new quote, or edits an existing pending one (same doc ID).
+  /// [laborCost] is the service/labour charge; [materialsCost] is optional
+  /// materials spend. Total shown to customer = laborCost + materialsCost.
   Future<void> submitQuote({
     required String jobId,
     required String artisanId,
-    required double amount,
+    required double laborCost,
+    double materialsCost = 0.0,
     required int durationDays,
     String? notes,
   }) async {
@@ -39,8 +40,12 @@ class QuoteService {
       throw StateError('Artisan profile not found for $artisanId');
     }
     final artisan = ArtisanModel.fromJson({...artisanSnap.data()!, 'uid': artisanId});
-    final isVerified = artisan.verificationStatus == 'id_verified' ||
-        artisan.verificationStatus == 'trusted';
+    // Deliberately real verification only, never betaTester — a beta
+    // tester's quote must not claim the Verified badge. Mirrors
+    // firestore.rules' isReallyVerified(), which the artisanVerified field
+    // is checked against server-side.
+    final isVerified = ArtisanEligibility.isReallyVerified(artisan);
+    final total = laborCost + materialsCost;
 
     final ref = _quoteRef(jobId, artisanId);
     final existing = await ref.get();
@@ -50,7 +55,9 @@ class QuoteService {
       'id': artisanId,
       'jobId': jobId,
       'artisanId': artisanId,
-      'amount': amount,
+      'laborCost': laborCost,
+      'materialsCost': materialsCost,
+      'amount': total, // backward compat — always equals laborCost + materialsCost
       'durationDays': durationDays,
       if (notes != null && notes.isNotEmpty) 'notes': notes,
       'status': 'pending',
@@ -61,21 +68,12 @@ class QuoteService {
       'artisanTrustTier': artisan.trustTier,
       'artisanVerified': isVerified,
       if (artisan.profileImageUrl != null) 'artisanProfileImageUrl': artisan.profileImageUrl,
+      'artisanTrustScore': artisan.trustScore,
     });
 
-    if (isNew) {
-      final jobSnap = await _db.collection('jobs').doc(jobId).get();
-      final customerId = jobSnap.data()?['customerId'] as String?;
-      if (customerId != null) {
-        await _notifications.send(
-          userId: customerId,
-          type: 'quote_received',
-          title: 'New Quote Received',
-          body: '${artisan.displayName} sent a quote for ₦${amount.toStringAsFixed(0)}.',
-          jobId: jobId,
-        );
-      }
-    }
+    // Stage 6 (HT-015): this notification is generated server-side from the
+    // underlying document change (functions/index.js); clients can no longer
+    // create notifications.
   }
 
   /// Withdraws a still-pending quote. No job mutation — quote-only write.
@@ -88,17 +86,9 @@ class QuoteService {
     }
     await ref.update({'status': 'withdrawn', 'updatedAt': FieldValue.serverTimestamp()});
 
-    final jobSnap = await _db.collection('jobs').doc(jobId).get();
-    final customerId = jobSnap.data()?['customerId'] as String?;
-    if (customerId != null) {
-      await _notifications.send(
-        userId: customerId,
-        type: 'quote_withdrawn',
-        title: 'Quote Withdrawn',
-        body: 'An artisan withdrew their quote for your job.',
-        jobId: jobId,
-      );
-    }
+    // Stage 6 (HT-015): this notification is generated server-side from the
+    // underlying document change (functions/index.js); clients can no longer
+    // create notifications.
   }
 
   /// Customer rejects a single quote without accepting another.
@@ -112,13 +102,9 @@ class QuoteService {
       throw StateError('Quote is not pending.');
     }
     await ref.update({'status': 'rejected', 'updatedAt': FieldValue.serverTimestamp()});
-    await _notifications.send(
-      userId: artisanId,
-      type: 'quote_rejected',
-      title: 'Quote Declined',
-      body: 'Your quote was declined for a job.',
-      jobId: jobId,
-    );
+    // Stage 6 (HT-015): this notification is generated server-side from the
+    // underlying document change (functions/index.js); clients can no longer
+    // create notifications.
   }
 
   /// Accepts a quote: closes every competing quote and matches the job —
@@ -140,13 +126,9 @@ class QuoteService {
       competingQuoteIds: competingIds,
     );
 
-    await _notifications.send(
-      userId: artisanId,
-      type: 'quote_accepted',
-      title: 'Quote Accepted!',
-      body: 'Your quote was accepted. You can now chat with the customer.',
-      jobId: jobId,
-    );
+    // Stage 6 (HT-015): this notification is generated server-side from the
+    // underlying document change (functions/index.js); clients can no longer
+    // create notifications.
   }
 
   Stream<List<QuoteModel>> watchJobQuotes(String jobId) {

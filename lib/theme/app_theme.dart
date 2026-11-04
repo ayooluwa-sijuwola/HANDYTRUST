@@ -2,14 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'app_colors.dart';
 
-/// Every color the app actually uses, with a light and dark variant.
-/// This is the single source of truth for dark-mode-aware colors — screens
-/// read `context.colors.X` (see the AppColorsX extension below) instead of
-/// the static AppColors.X constants, so they automatically repaint on
-/// theme toggle. Brand/semantic colors (primary, accent, error, warning,
-/// status/trust/rating colors) get a slightly brighter dark variant so they
-/// keep adequate contrast against their own dark-mode "Surface" pairing;
-/// pure neutrals (background/surface/borders/text) invert.
 class AppColorsExtension extends ThemeExtension<AppColorsExtension> {
   final Color primary;
   final Color primaryDark;
@@ -22,6 +14,7 @@ class AppColorsExtension extends ThemeExtension<AppColorsExtension> {
   final Color warningSurface;
   final Color background;
   final Color surface;
+  final Color surfaceElevated;
   final Color surfaceVariant;
   final Color border;
   final Color borderLight;
@@ -29,6 +22,7 @@ class AppColorsExtension extends ThemeExtension<AppColorsExtension> {
   final Color textSecondary;
   final Color textTertiary;
   final Color textInverse;
+  final Color disabled;
   final Color bubbleSent;
   final Color bubbleReceived;
   final Color statusRequested;
@@ -49,6 +43,22 @@ class AppColorsExtension extends ThemeExtension<AppColorsExtension> {
   final Color trustEliteSurface;
   final Color trustTrusted;
   final Color trustTrustedSurface;
+  // Escrow-specific — added per 02-design-system.md §2.2 Gap 1: these
+  // existed only as raw AppColors constants with no dark-mode pair,
+  // unlike every other semantic color in this extension. Closed here
+  // while building the first real escrow-status UI (Wallet).
+  final Color escrowLocked;
+  final Color escrowPending;
+  final Color escrowReleased;
+  final Color escrowFailed;
+  // Stitch design-system additions — fixed regardless of light/dark theme,
+  // see app_colors.dart for rationale.
+  final Color ink;
+  final Color onInk;
+  final Color navy;
+  final Color navySurface;
+  final Color onNavy;
+  final Color onNavySecondary;
 
   const AppColorsExtension({
     required this.primary,
@@ -62,6 +72,7 @@ class AppColorsExtension extends ThemeExtension<AppColorsExtension> {
     required this.warningSurface,
     required this.background,
     required this.surface,
+    required this.surfaceElevated,
     required this.surfaceVariant,
     required this.border,
     required this.borderLight,
@@ -69,6 +80,7 @@ class AppColorsExtension extends ThemeExtension<AppColorsExtension> {
     required this.textSecondary,
     required this.textTertiary,
     required this.textInverse,
+    required this.disabled,
     required this.bubbleSent,
     required this.bubbleReceived,
     required this.statusRequested,
@@ -89,6 +101,16 @@ class AppColorsExtension extends ThemeExtension<AppColorsExtension> {
     required this.trustEliteSurface,
     required this.trustTrusted,
     required this.trustTrustedSurface,
+    required this.escrowLocked,
+    required this.escrowPending,
+    required this.escrowReleased,
+    required this.escrowFailed,
+    required this.ink,
+    required this.onInk,
+    required this.navy,
+    required this.navySurface,
+    required this.onNavy,
+    required this.onNavySecondary,
   });
 
   static const light = AppColorsExtension(
@@ -103,6 +125,9 @@ class AppColorsExtension extends ThemeExtension<AppColorsExtension> {
     warningSurface: AppColors.warningSurface,
     background: AppColors.background,
     surface: AppColors.surface,
+    // Light mode has no prior elevated-surface concept — dialogs/sheets
+    // already default to plain white, which is correct and unchanged.
+    surfaceElevated: AppColors.surface,
     surfaceVariant: AppColors.surfaceVariant,
     border: AppColors.border,
     borderLight: AppColors.borderLight,
@@ -110,6 +135,7 @@ class AppColorsExtension extends ThemeExtension<AppColorsExtension> {
     textSecondary: AppColors.textSecondary,
     textTertiary: AppColors.textTertiary,
     textInverse: AppColors.textInverse,
+    disabled: AppColors.textTertiary,
     bubbleSent: AppColors.bubbleSent,
     bubbleReceived: AppColors.bubbleReceived,
     statusRequested: AppColors.statusRequested,
@@ -130,47 +156,71 @@ class AppColorsExtension extends ThemeExtension<AppColorsExtension> {
     trustEliteSurface: AppColors.trustEliteSurface,
     trustTrusted: AppColors.trustTrusted,
     trustTrustedSurface: AppColors.trustTrustedSurface,
+    escrowLocked: AppColors.escrowLocked,
+    escrowPending: AppColors.escrowPending,
+    escrowReleased: AppColors.escrowReleased,
+    escrowFailed: AppColors.error,
+    ink: AppColors.ink,
+    onInk: AppColors.onInk,
+    navy: AppColors.navy,
+    navySurface: AppColors.navySurface,
+    onNavy: AppColors.onNavy,
+    onNavySecondary: AppColors.onNavySecondary,
   );
 
   static const dark = AppColorsExtension(
-    primary: Color(0xFF3B82F6),
-    primaryDark: Color(0xFF60A5FA),
-    primarySurface: Color(0xFF1E3A8A),
-    accent: Color(0xFF34D399),
-    accentSurface: Color(0xFF065F46),
+    primary: AppColors.primary,
+    primaryDark: AppColors.primaryLight,
+    primarySurface: Color(0xFF14532D),
+    accent: AppColors.accentLight,
+    accentSurface: Color(0xFF1E3A8A),
     error: Color(0xFFF87171),
     errorSurface: Color(0xFF7F1D1D),
     warning: Color(0xFFFBBF24),
     warningSurface: Color(0xFF78350F),
-    background: Color(0xFF111827),
-    surface: Color(0xFF1F2937),
-    surfaceVariant: Color(0xFF374151),
-    border: Color(0xFF4B5563),
-    borderLight: Color(0xFF374151),
-    textPrimary: Color(0xFFF3F4F6),
-    textSecondary: Color(0xFFD1D5DB),
-    textTertiary: Color(0xFF9CA3AF),
-    textInverse: Color(0xFF0B1220),
-    bubbleSent: Color(0xFF3B82F6),
-    bubbleReceived: Color(0xFF374151),
-    statusRequested: Color(0xFF9CA3AF),
-    statusMatched: Color(0xFFC4B5FD),
+    background: AppColors.darkBackground,
+    surface: AppColors.darkSurface,
+    surfaceElevated: AppColors.darkSurfaceElevated,
+    surfaceVariant: AppColors.darkSurfaceVariant,
+    border: AppColors.darkBorder,
+    borderLight: AppColors.darkBorderLight,
+    textPrimary: Color(0xFFF8FAFC),
+    textSecondary: Color(0xFF94A3B8),
+    textTertiary: AppColors.darkTextTertiary,
+    textInverse: AppColors.darkBackground,
+    disabled: AppColors.darkDisabled,
+    bubbleSent: AppColors.primary,
+    bubbleReceived: AppColors.darkSurfaceVariant,
+    statusRequested: Color(0xFF64748B),
+    statusMatched: Color(0xFFA78BFA),
     statusInChat: Color(0xFF60A5FA),
-    statusEscrowLocked: Color(0xFF34D399),
+    statusEscrowLocked: AppColors.primary,
     statusInProgress: Color(0xFFFBBF24),
     statusSubmitted: Color(0xFF60A5FA),
-    statusCompleted: Color(0xFF34D399),
+    statusCompleted: AppColors.primary,
     statusDisputed: Color(0xFFF87171),
-    statusResolved: Color(0xFF9CA3AF),
+    statusResolved: Color(0xFF64748B),
     ratingGold: Color(0xFFFBBF24),
-    shimmerBase: Color(0xFF374151),
-    shimmerHighlight: Color(0xFF4B5563),
+    shimmerBase: AppColors.darkSurfaceVariant,
+    shimmerHighlight: Color(0xFF475569),
     risingBadge: Color(0xFFC4B5FD),
     risingBadgeSurface: Color(0xFF4C1D95),
     trustElite: Color(0xFFFBBF24),
     trustEliteSurface: Color(0xFF78350F),
-    trustTrusted: Color(0xFF60A5FA),
-    trustTrustedSurface: Color(0xFF1E3A8A),
+    trustTrusted: AppColors.primary,
+    trustTrustedSurface: Color(0xFF14532D),
+    escrowLocked: AppColors.primary,
+    escrowPending: Color(0xFFFBBF24),
+    escrowReleased: AppColors.accentLight,
+    escrowFailed: Color(0xFFF87171),
+    // Dark-specific raised tones — see app_colors.dart for why these can't
+    // reuse the light-mode-fixed AppColors.ink/navy values here.
+    ink: AppColors.darkInk,
+    onInk: AppColors.onInk,
+    navy: AppColors.darkNavy,
+    navySurface: AppColors.darkNavySurface,
+    onNavy: AppColors.onNavy,
+    onNavySecondary: AppColors.onNavySecondary,
   );
 
   @override
@@ -192,6 +242,7 @@ class AppColorsExtension extends ThemeExtension<AppColorsExtension> {
       warningSurface: m(warningSurface, other.warningSurface),
       background: m(background, other.background),
       surface: m(surface, other.surface),
+      surfaceElevated: m(surfaceElevated, other.surfaceElevated),
       surfaceVariant: m(surfaceVariant, other.surfaceVariant),
       border: m(border, other.border),
       borderLight: m(borderLight, other.borderLight),
@@ -199,6 +250,7 @@ class AppColorsExtension extends ThemeExtension<AppColorsExtension> {
       textSecondary: m(textSecondary, other.textSecondary),
       textTertiary: m(textTertiary, other.textTertiary),
       textInverse: m(textInverse, other.textInverse),
+      disabled: m(disabled, other.disabled),
       bubbleSent: m(bubbleSent, other.bubbleSent),
       bubbleReceived: m(bubbleReceived, other.bubbleReceived),
       statusRequested: m(statusRequested, other.statusRequested),
@@ -219,14 +271,23 @@ class AppColorsExtension extends ThemeExtension<AppColorsExtension> {
       trustEliteSurface: m(trustEliteSurface, other.trustEliteSurface),
       trustTrusted: m(trustTrusted, other.trustTrusted),
       trustTrustedSurface: m(trustTrustedSurface, other.trustTrustedSurface),
+      escrowLocked: m(escrowLocked, other.escrowLocked),
+      escrowPending: m(escrowPending, other.escrowPending),
+      escrowReleased: m(escrowReleased, other.escrowReleased),
+      escrowFailed: m(escrowFailed, other.escrowFailed),
+      ink: m(ink, other.ink),
+      onInk: m(onInk, other.onInk),
+      navy: m(navy, other.navy),
+      navySurface: m(navySurface, other.navySurface),
+      onNavy: m(onNavy, other.onNavy),
+      onNavySecondary: m(onNavySecondary, other.onNavySecondary),
     );
   }
 }
 
-/// Ergonomic access: `context.colors.textPrimary` instead of
-/// `Theme.of(context).extension<AppColorsExtension>()!.textPrimary`.
 extension AppColorsX on BuildContext {
-  AppColorsExtension get colors => Theme.of(this).extension<AppColorsExtension>()!;
+  AppColorsExtension get colors =>
+      Theme.of(this).extension<AppColorsExtension>() ?? AppColorsExtension.light;
 }
 
 abstract final class AppTheme {
@@ -237,19 +298,19 @@ abstract final class AppTheme {
         colorScheme: const ColorScheme(
           brightness: Brightness.light,
           primary: AppColors.primary,
-          onPrimary: AppColors.textInverse,
+          onPrimary: Colors.white,
           primaryContainer: AppColors.primarySurface,
           onPrimaryContainer: AppColors.primaryDark,
           secondary: AppColors.accent,
-          onSecondary: AppColors.textInverse,
+          onSecondary: Colors.white,
           secondaryContainer: AppColors.accentSurface,
-          onSecondaryContainer: Color(0xFF065F46),
+          onSecondaryContainer: Color(0xFF1E3A8A),
           surface: AppColors.surface,
           onSurface: AppColors.textPrimary,
           surfaceContainerHighest: AppColors.surfaceVariant,
           onSurfaceVariant: AppColors.textSecondary,
           error: AppColors.error,
-          onError: AppColors.textInverse,
+          onError: Colors.white,
           errorContainer: AppColors.errorSurface,
           onErrorContainer: Color(0xFF7F1D1D),
           outline: AppColors.border,
@@ -262,13 +323,12 @@ abstract final class AppTheme {
           backgroundColor: AppColors.surface,
           foregroundColor: AppColors.textPrimary,
           elevation: 0,
-          scrolledUnderElevation: 1,
-          shadowColor: Color(0x1A000000),
+          scrolledUnderElevation: 0,
           centerTitle: false,
           titleTextStyle: TextStyle(
             fontFamily: 'Inter',
             fontSize: 18,
-            fontWeight: FontWeight.w600,
+            fontWeight: FontWeight.w700,
             color: AppColors.textPrimary,
             letterSpacing: -0.3,
           ),
@@ -280,10 +340,10 @@ abstract final class AppTheme {
         elevatedButtonTheme: ElevatedButtonThemeData(
           style: ElevatedButton.styleFrom(
             backgroundColor: AppColors.primary,
-            foregroundColor: AppColors.textInverse,
+            foregroundColor: Colors.white,
             minimumSize: const Size(double.infinity, 52),
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(14),
             ),
             elevation: 0,
             textStyle: const TextStyle(
@@ -300,7 +360,7 @@ abstract final class AppTheme {
             minimumSize: const Size(double.infinity, 52),
             side: const BorderSide(color: AppColors.primary, width: 1.5),
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(14),
             ),
             textStyle: const TextStyle(
               fontFamily: 'Inter',
@@ -321,30 +381,32 @@ abstract final class AppTheme {
         ),
         inputDecorationTheme: InputDecorationTheme(
           filled: true,
-          fillColor: AppColors.surface,
+          fillColor: AppColors.surfaceVariant,
           contentPadding: const EdgeInsets.symmetric(
             horizontal: 16,
             vertical: 14,
           ),
           border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: AppColors.border),
+            borderRadius: BorderRadius.circular(14),
+            borderSide: BorderSide.none,
           ),
           enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: AppColors.border),
+            borderRadius: BorderRadius.circular(14),
+            borderSide: BorderSide.none,
           ),
           focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: AppColors.primary, width: 1.5),
+            borderRadius: BorderRadius.circular(14),
+            borderSide:
+                const BorderSide(color: AppColors.primary, width: 1.5),
           ),
           errorBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(14),
             borderSide: const BorderSide(color: AppColors.error),
           ),
           focusedErrorBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: AppColors.error, width: 1.5),
+            borderRadius: BorderRadius.circular(14),
+            borderSide:
+                const BorderSide(color: AppColors.error, width: 1.5),
           ),
           labelStyle: const TextStyle(
             fontFamily: 'Inter',
@@ -357,12 +419,16 @@ abstract final class AppTheme {
             fontSize: 14,
           ),
         ),
+        // Borderless, gray-fill cards — per 02-design-system-v2.md §9.2
+        // (visual reference reset), superseding the earlier white-card
+        // hairline-border pattern. surfaceVariant reads as a subtle gray
+        // against the background's near-white, matching the reference's
+        // card-vs-page separation.
         cardTheme: CardThemeData(
-          color: AppColors.surface,
+          color: AppColors.surfaceVariant,
           elevation: 0,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-            side: const BorderSide(color: AppColors.borderLight),
+            borderRadius: BorderRadius.circular(20),
           ),
           margin: EdgeInsets.zero,
         ),
@@ -402,15 +468,31 @@ abstract final class AppTheme {
           thickness: 1,
           space: 1,
         ),
+        // Explicit rather than left to the Material3 default — matches
+        // that default exactly (AppColors.surface = white) so light mode
+        // is unchanged; exists so the dark theme below can override it to
+        // a properly elevated tone instead of inheriting the same default.
+        dialogTheme: const DialogThemeData(
+          backgroundColor: AppColors.surface,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.all(Radius.circular(20)),
+          ),
+        ),
+        bottomSheetTheme: const BottomSheetThemeData(
+          backgroundColor: AppColors.surface,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+        ),
         snackBarTheme: SnackBarThemeData(
           backgroundColor: AppColors.textPrimary,
           contentTextStyle: const TextStyle(
             fontFamily: 'Inter',
-            color: AppColors.textInverse,
+            color: Colors.white,
             fontSize: 14,
           ),
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(14),
           ),
           behavior: SnackBarBehavior.floating,
         ),
@@ -418,37 +500,37 @@ abstract final class AppTheme {
           displayLarge: TextStyle(
             fontFamily: 'Inter',
             fontSize: 32,
-            fontWeight: FontWeight.w700,
+            fontWeight: FontWeight.w800,
             color: AppColors.textPrimary,
-            letterSpacing: -0.5,
+            letterSpacing: -0.8,
           ),
           displayMedium: TextStyle(
             fontFamily: 'Inter',
             fontSize: 28,
             fontWeight: FontWeight.w700,
             color: AppColors.textPrimary,
-            letterSpacing: -0.3,
+            letterSpacing: -0.5,
           ),
           headlineLarge: TextStyle(
             fontFamily: 'Inter',
             fontSize: 24,
             fontWeight: FontWeight.w700,
             color: AppColors.textPrimary,
-            letterSpacing: -0.3,
+            letterSpacing: -0.4,
           ),
           headlineMedium: TextStyle(
             fontFamily: 'Inter',
             fontSize: 20,
-            fontWeight: FontWeight.w600,
+            fontWeight: FontWeight.w700,
             color: AppColors.textPrimary,
-            letterSpacing: -0.2,
+            letterSpacing: -0.3,
           ),
           headlineSmall: TextStyle(
             fontFamily: 'Inter',
             fontSize: 18,
             fontWeight: FontWeight.w600,
             color: AppColors.textPrimary,
-            letterSpacing: -0.1,
+            letterSpacing: -0.2,
           ),
           titleLarge: TextStyle(
             fontFamily: 'Inter',
@@ -501,53 +583,45 @@ abstract final class AppTheme {
         ),
       );
 
-  /// Mirrors light's structure component-for-component. Most screens in
-  /// this app style themselves directly off AppColors constants rather
-  /// than Theme.of(context), so this theme drives Flutter's own built-in
-  /// widgets (default Scaffold/AppBar/SnackBar/inputs/buttons not given an
-  /// explicit color) correctly, but won't repaint screens that hardcode
-  /// AppColors.* — see the theme system audit note for what that means
-  /// in practice.
   static ThemeData get dark => ThemeData(
         useMaterial3: true,
         brightness: Brightness.dark,
         extensions: const [AppColorsExtension.dark],
         colorScheme: const ColorScheme(
           brightness: Brightness.dark,
-          primary: Color(0xFF3B82F6),
-          onPrimary: Color(0xFF0B1220),
-          primaryContainer: Color(0xFF1E3A8A),
-          onPrimaryContainer: Color(0xFFDBEAFE),
-          secondary: Color(0xFF34D399),
-          onSecondary: Color(0xFF0B1220),
-          secondaryContainer: Color(0xFF065F46),
-          onSecondaryContainer: Color(0xFFD1FAE5),
-          surface: Color(0xFF1F2937),
-          onSurface: Color(0xFFF3F4F6),
-          surfaceContainerHighest: Color(0xFF374151),
-          onSurfaceVariant: Color(0xFFD1D5DB),
+          primary: AppColors.primary,
+          onPrimary: Colors.white,
+          primaryContainer: Color(0xFF14532D),
+          onPrimaryContainer: Color(0xFFDCFCE7),
+          secondary: AppColors.accentLight,
+          onSecondary: AppColors.darkBackground,
+          secondaryContainer: Color(0xFF1E3A8A),
+          onSecondaryContainer: Color(0xFFDBEAFE),
+          surface: AppColors.darkSurface,
+          onSurface: Color(0xFFF8FAFC),
+          surfaceContainerHighest: AppColors.darkSurfaceVariant,
+          onSurfaceVariant: Color(0xFF94A3B8),
           error: Color(0xFFF87171),
           onError: Color(0xFF450A0A),
           errorContainer: Color(0xFF7F1D1D),
           onErrorContainer: Color(0xFFFEE2E2),
-          outline: Color(0xFF4B5563),
-          outlineVariant: Color(0xFF374151),
-          shadow: Color(0x33000000),
+          outline: AppColors.darkBorder,
+          outlineVariant: AppColors.darkBorderLight,
+          shadow: Color(0x40000000),
         ),
-        scaffoldBackgroundColor: const Color(0xFF111827),
+        scaffoldBackgroundColor: AppColors.darkBackground,
         fontFamily: 'Inter',
         appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xFF1F2937),
-          foregroundColor: Color(0xFFF3F4F6),
+          backgroundColor: AppColors.darkBackground,
+          foregroundColor: Color(0xFFF8FAFC),
           elevation: 0,
-          scrolledUnderElevation: 1,
-          shadowColor: Color(0x33000000),
+          scrolledUnderElevation: 0,
           centerTitle: false,
           titleTextStyle: TextStyle(
             fontFamily: 'Inter',
             fontSize: 18,
-            fontWeight: FontWeight.w600,
-            color: Color(0xFFF3F4F6),
+            fontWeight: FontWeight.w700,
+            color: Color(0xFFF8FAFC),
             letterSpacing: -0.3,
           ),
           systemOverlayStyle: SystemUiOverlayStyle(
@@ -557,11 +631,11 @@ abstract final class AppTheme {
         ),
         elevatedButtonTheme: ElevatedButtonThemeData(
           style: ElevatedButton.styleFrom(
-            backgroundColor: const Color(0xFF3B82F6),
-            foregroundColor: const Color(0xFF0B1220),
+            backgroundColor: AppColors.primary,
+            foregroundColor: Colors.white,
             minimumSize: const Size(double.infinity, 52),
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(14),
             ),
             elevation: 0,
             textStyle: const TextStyle(
@@ -574,11 +648,11 @@ abstract final class AppTheme {
         ),
         outlinedButtonTheme: OutlinedButtonThemeData(
           style: OutlinedButton.styleFrom(
-            foregroundColor: const Color(0xFF3B82F6),
+            foregroundColor: AppColors.primary,
             minimumSize: const Size(double.infinity, 52),
-            side: const BorderSide(color: Color(0xFF3B82F6), width: 1.5),
+            side: const BorderSide(color: AppColors.primary, width: 1.5),
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(14),
             ),
             textStyle: const TextStyle(
               fontFamily: 'Inter',
@@ -589,7 +663,7 @@ abstract final class AppTheme {
         ),
         textButtonTheme: TextButtonThemeData(
           style: TextButton.styleFrom(
-            foregroundColor: const Color(0xFF3B82F6),
+            foregroundColor: AppColors.primary,
             textStyle: const TextStyle(
               fontFamily: 'Inter',
               fontSize: 14,
@@ -599,59 +673,63 @@ abstract final class AppTheme {
         ),
         inputDecorationTheme: InputDecorationTheme(
           filled: true,
-          fillColor: const Color(0xFF1F2937),
+          fillColor: AppColors.darkSurface,
           contentPadding: const EdgeInsets.symmetric(
             horizontal: 16,
             vertical: 14,
           ),
           border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: Color(0xFF4B5563)),
+            borderRadius: BorderRadius.circular(14),
+            borderSide: const BorderSide(color: AppColors.darkBorder),
           ),
           enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: Color(0xFF4B5563)),
+            borderRadius: BorderRadius.circular(14),
+            borderSide: const BorderSide(color: AppColors.darkBorder),
           ),
           focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: Color(0xFF3B82F6), width: 1.5),
+            borderRadius: BorderRadius.circular(14),
+            borderSide:
+                const BorderSide(color: AppColors.primary, width: 1.5),
           ),
           errorBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(14),
             borderSide: const BorderSide(color: Color(0xFFF87171)),
           ),
           focusedErrorBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: Color(0xFFF87171), width: 1.5),
+            borderRadius: BorderRadius.circular(14),
+            borderSide:
+                const BorderSide(color: Color(0xFFF87171), width: 1.5),
           ),
           labelStyle: const TextStyle(
             fontFamily: 'Inter',
-            color: Color(0xFFD1D5DB),
+            color: Color(0xFF94A3B8),
             fontSize: 14,
           ),
           hintStyle: const TextStyle(
             fontFamily: 'Inter',
-            color: Color(0xFF9CA3AF),
+            color: AppColors.darkTextTertiary,
             fontSize: 14,
           ),
         ),
+        // Borderless per 02-design-system-v2.md §9.2 — darkSurface is
+        // already visually distinct from darkBackground, so unlike light
+        // mode this needed no color change, only the border removed.
         cardTheme: CardThemeData(
-          color: const Color(0xFF1F2937),
+          color: AppColors.darkSurface,
           elevation: 0,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-            side: const BorderSide(color: Color(0xFF374151)),
+            borderRadius: BorderRadius.circular(20),
           ),
           margin: EdgeInsets.zero,
         ),
         chipTheme: ChipThemeData(
-          backgroundColor: const Color(0xFF374151),
-          selectedColor: const Color(0xFF1E3A8A),
+          backgroundColor: AppColors.darkSurfaceVariant,
+          selectedColor: const Color(0xFF14532D),
           labelStyle: const TextStyle(
             fontFamily: 'Inter',
             fontSize: 13,
             fontWeight: FontWeight.w500,
-            color: Color(0xFFF3F4F6),
+            color: Color(0xFFF8FAFC),
           ),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(20),
@@ -660,9 +738,9 @@ abstract final class AppTheme {
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         ),
         bottomNavigationBarTheme: const BottomNavigationBarThemeData(
-          backgroundColor: Color(0xFF1F2937),
-          selectedItemColor: Color(0xFF3B82F6),
-          unselectedItemColor: Color(0xFF9CA3AF),
+          backgroundColor: AppColors.darkSurface,
+          selectedItemColor: AppColors.primary,
+          unselectedItemColor: AppColors.darkTextTertiary,
           type: BottomNavigationBarType.fixed,
           elevation: 0,
           selectedLabelStyle: TextStyle(
@@ -677,19 +755,35 @@ abstract final class AppTheme {
           ),
         ),
         dividerTheme: const DividerThemeData(
-          color: Color(0xFF374151),
+          color: AppColors.darkBorder,
           thickness: 1,
           space: 1,
         ),
+        // surfaceElevated (not darkSurface) — dialogs/sheets sit visually
+        // "above" a regular card, so they get their own, lighter rung on
+        // the elevation ladder instead of blending into the same tone as
+        // whatever card triggered them.
+        dialogTheme: const DialogThemeData(
+          backgroundColor: AppColors.darkSurfaceElevated,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.all(Radius.circular(20)),
+          ),
+        ),
+        bottomSheetTheme: const BottomSheetThemeData(
+          backgroundColor: AppColors.darkSurfaceElevated,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+        ),
         snackBarTheme: SnackBarThemeData(
-          backgroundColor: const Color(0xFF374151),
+          backgroundColor: AppColors.darkSurfaceVariant,
           contentTextStyle: const TextStyle(
             fontFamily: 'Inter',
-            color: Color(0xFFF3F4F6),
+            color: Color(0xFFF8FAFC),
             fontSize: 14,
           ),
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(14),
           ),
           behavior: SnackBarBehavior.floating,
         ),
@@ -697,85 +791,85 @@ abstract final class AppTheme {
           displayLarge: TextStyle(
             fontFamily: 'Inter',
             fontSize: 32,
-            fontWeight: FontWeight.w700,
-            color: Color(0xFFF3F4F6),
-            letterSpacing: -0.5,
+            fontWeight: FontWeight.w800,
+            color: Color(0xFFF8FAFC),
+            letterSpacing: -0.8,
           ),
           displayMedium: TextStyle(
             fontFamily: 'Inter',
             fontSize: 28,
             fontWeight: FontWeight.w700,
-            color: Color(0xFFF3F4F6),
-            letterSpacing: -0.3,
+            color: Color(0xFFF8FAFC),
+            letterSpacing: -0.5,
           ),
           headlineLarge: TextStyle(
             fontFamily: 'Inter',
             fontSize: 24,
             fontWeight: FontWeight.w700,
-            color: Color(0xFFF3F4F6),
-            letterSpacing: -0.3,
+            color: Color(0xFFF8FAFC),
+            letterSpacing: -0.4,
           ),
           headlineMedium: TextStyle(
             fontFamily: 'Inter',
             fontSize: 20,
-            fontWeight: FontWeight.w600,
-            color: Color(0xFFF3F4F6),
-            letterSpacing: -0.2,
+            fontWeight: FontWeight.w700,
+            color: Color(0xFFF8FAFC),
+            letterSpacing: -0.3,
           ),
           headlineSmall: TextStyle(
             fontFamily: 'Inter',
             fontSize: 18,
             fontWeight: FontWeight.w600,
-            color: Color(0xFFF3F4F6),
-            letterSpacing: -0.1,
+            color: Color(0xFFF8FAFC),
+            letterSpacing: -0.2,
           ),
           titleLarge: TextStyle(
             fontFamily: 'Inter',
             fontSize: 16,
             fontWeight: FontWeight.w600,
-            color: Color(0xFFF3F4F6),
+            color: Color(0xFFF8FAFC),
           ),
           titleMedium: TextStyle(
             fontFamily: 'Inter',
             fontSize: 15,
             fontWeight: FontWeight.w500,
-            color: Color(0xFFF3F4F6),
+            color: Color(0xFFF8FAFC),
           ),
           titleSmall: TextStyle(
             fontFamily: 'Inter',
             fontSize: 13,
             fontWeight: FontWeight.w500,
-            color: Color(0xFFD1D5DB),
+            color: Color(0xFF94A3B8),
           ),
           bodyLarge: TextStyle(
             fontFamily: 'Inter',
             fontSize: 16,
             fontWeight: FontWeight.w400,
-            color: Color(0xFFF3F4F6),
+            color: Color(0xFFF8FAFC),
           ),
           bodyMedium: TextStyle(
             fontFamily: 'Inter',
             fontSize: 14,
             fontWeight: FontWeight.w400,
-            color: Color(0xFFF3F4F6),
+            color: Color(0xFFF8FAFC),
           ),
           bodySmall: TextStyle(
             fontFamily: 'Inter',
             fontSize: 12,
             fontWeight: FontWeight.w400,
-            color: Color(0xFFD1D5DB),
+            color: Color(0xFF94A3B8),
           ),
           labelLarge: TextStyle(
             fontFamily: 'Inter',
             fontSize: 14,
             fontWeight: FontWeight.w600,
-            color: Color(0xFFF3F4F6),
+            color: Color(0xFFF8FAFC),
           ),
           labelSmall: TextStyle(
             fontFamily: 'Inter',
             fontSize: 11,
             fontWeight: FontWeight.w500,
-            color: Color(0xFF9CA3AF),
+            color: AppColors.darkTextTertiary,
           ),
         ),
       );

@@ -1,11 +1,40 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import '../../models/user_model.dart';
 
-class AuthService {
+/// The subset of [AuthService] that [AuthNotifier] depends on. Exists so
+/// tests can supply a fake implementation without triggering a real
+/// `FirebaseAuth.instance` call — [AuthService] itself has eager field
+/// initializers that make it otherwise impossible to construct in a plain
+/// unit test (see design/P0_REMEDIATION_PLAN.md §6.3,
+/// test/auth_provider_password_reset_test.dart).
+abstract class IAuthService {
+  User? get currentUser;
+
+  Future<UserCredential> createAccount({
+    required String email,
+    required String password,
+    required UserModel profile,
+  });
+
+  Future<UserCredential> signIn({
+    required String email,
+    required String password,
+  });
+
+  Future<void> sendEmailVerification();
+
+  Future<void> sendPasswordReset(String email);
+
+  Future<void> signOut();
+}
+
+class AuthService implements IAuthService {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _db = FirebaseFirestore.instance;
 
+  @override
   User? get currentUser => _auth.currentUser;
 
   /// Uses userChanges() rather than authStateChanges(): authStateChanges()
@@ -15,6 +44,7 @@ class AuthService {
   Stream<User?> authStateChanges() => _auth.userChanges();
 
   /// Creates a new Firebase Auth account and stores the user profile.
+  @override
   Future<UserCredential> createAccount({
     required String email,
     required String password,
@@ -36,6 +66,7 @@ class AuthService {
   }
 
   /// Signs in with email and password.
+  @override
   Future<UserCredential> signIn({
     required String email,
     required String password,
@@ -47,11 +78,13 @@ class AuthService {
   }
 
   /// Sends an email verification link. Call after createAccount or on demand.
+  @override
   Future<void> sendEmailVerification() async {
     await _auth.currentUser?.sendEmailVerification();
   }
 
   /// Sends a password reset email.
+  @override
   Future<void> sendPasswordReset(String email) async {
     await _auth.sendPasswordResetEmail(email: email);
   }
@@ -69,7 +102,12 @@ class AuthService {
   Stream<UserModel?> userProfileStream(String uid) {
     return _db.collection('users').doc(uid).snapshots().asyncMap((snap) async {
       if (snap.exists) {
-        return UserModel.fromJson({...snap.data()!, 'uid': snap.id});
+        final data = snap.data();
+        if (data == null) {
+          debugPrint('[auth_service] userProfileStream: doc exists but data() == null for uid=${snap.id}');
+          return null;
+        }
+        return UserModel.fromJson({...data, 'uid': snap.id});
       }
 
       final authUser = _auth.currentUser;
@@ -102,13 +140,19 @@ class AuthService {
   Future<UserModel?> fetchUserProfile(String uid) async {
     final snap = await _db.collection('users').doc(uid).get();
     if (!snap.exists) return null;
-    return UserModel.fromJson({...snap.data()!, 'uid': snap.id});
+    final data = snap.data();
+    if (data == null) {
+      debugPrint('[auth_service] fetchUserProfile: doc exists but data() == null for uid=$uid');
+      return null;
+    }
+    return UserModel.fromJson({...data, 'uid': snap.id});
   }
 
   Future<void> updateUserProfile(String uid, Map<String, dynamic> data) async {
     await _db.collection('users').doc(uid).update(data);
   }
 
+  @override
   Future<void> signOut() async {
     await _auth.signOut();
   }
