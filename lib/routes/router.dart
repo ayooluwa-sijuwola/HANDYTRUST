@@ -35,20 +35,21 @@ import '../screens/home/home_screen.dart';
 import '../screens/artisan/artisan_list_screen.dart';
 import '../screens/artisan/secure_booking_screen.dart';
 import '../screens/artisan/favorites_screen.dart';
-import '../screens/chat/my_chats_screen.dart';
 import '../screens/payment/payment_webview_screen.dart';
 import '../screens/job/job_detail_screen.dart';
 import '../screens/review/review_screen.dart';
 import '../screens/dispute/dispute_screen.dart';
 import '../screens/auth/forgot_password_screen.dart';
-import '../screens/admin/admin_dashboard_screen.dart'
-    show AdminDashboardScreen, AdminShell;
-import '../screens/admin/admin_sidebar.dart' show AdminSection;
+import '../ui/admin/admin_finance_compliance.dart';
+import '../ui/admin/admin_operations.dart';
+import '../ui/admin/admin_overview.dart';
+import '../ui/admin/admin_people.dart';
+import '../ui/admin/admin_shell.dart';
 import '../models/portfolio_project_model.dart';
 import '../widgets/cannot_open_directly_screen.dart';
-import '../screens/settings/settings_screen.dart';
-import '../screens/support/contact_support_screen.dart';
-import '../screens/support/about_screen.dart';
+import '../ui/screens/messages_screen.dart';
+import '../ui/settings/help_screens.dart';
+import '../ui/settings/settings_screens.dart';
 import '../screens/auth/suspended_screen.dart';
 import '../screens/auth/role_selection_screen.dart';
 
@@ -213,9 +214,21 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: '/forgot-password', builder: (context, _) => const ForgotPasswordScreen()),
       GoRoute(path: '/suspended', builder: (context, _) => const SuspendedScreen()),
       GoRoute(path: '/role-select', builder: (context, _) => const RoleSelectionScreen()),
-      GoRoute(path: '/support', builder: (context, _) => const ContactSupportScreen()),
-      GoRoute(path: '/about', builder: (context, _) => const AboutScreen()),
-      GoRoute(path: '/settings', builder: (context, _) => const SettingsScreen()),
+      // Stage 8.2: Support Centre and About (both reachable while suspended
+      // via the redirect's /support allow-list for Support).
+      GoRoute(path: '/support', builder: (context, _) => const SupportCentreScreen()),
+      GoRoute(path: '/about', builder: (context, _) => const AboutHandyTrustScreen()),
+      // Stage 8.2 Settings (reached from Profile); every option has its own
+      // destination.
+      GoRoute(
+        path: '/settings',
+        builder: (context, _) => const SettingsScreen(),
+        routes: [
+          GoRoute(path: 'personal', builder: (context, _) => const PersonalInfoScreen()),
+          GoRoute(path: 'notifications', builder: (context, _) => const NotificationPreferencesScreen()),
+          GoRoute(path: 'security', builder: (context, _) => const SecurityScreen()),
+        ],
+      ),
       // Customers: escrow payments summary (Stage 8). Artisans: Earnings tab
       // of the artisan shell (Stage 8.1).
       GoRoute(
@@ -296,14 +309,16 @@ final routerProvider = Provider<GoRouter>((ref) {
           final extra = state.extra as Map<String, dynamic>? ?? {};
           return ChatScreen(
             jobId: _paramOrEmpty(state, 'jobId'),
-            otherUserId: extra['artisanId'] as String? ?? '',
+            // Stage 8.2: `?with=` names the other participant so a link can
+            // open one specific conversation without route extras.
+            otherUserId: extra['artisanId'] as String? ?? state.uri.queryParameters['with'] ?? '',
             otherUserName: extra['artisanName'] as String?,
           );
         },
       ),
       GoRoute(
         path: '/my-chats',
-        builder: (_, _) => const _RoleAware(customer: MyChatsScreen(), artisan: ArtisanMessagesScreen()),
+        builder: (_, _) => const _RoleAware(customer: CustomerMessagesScreen(), artisan: ArtisanMessagesScreen()),
       ),
 
       // Payment
@@ -358,66 +373,8 @@ final routerProvider = Provider<GoRouter>((ref) {
             path: '/admin',
             redirect: (_, _) => AdminSection.dashboard.path,
           ),
-          GoRoute(
-            path: AdminSection.dashboard.path,
-            builder: (_, _) =>
-                const AdminDashboardScreen(section: AdminSection.dashboard),
-          ),
-          GoRoute(
-            path: AdminSection.users.path,
-            builder: (_, _) =>
-                const AdminDashboardScreen(section: AdminSection.users),
-          ),
-          GoRoute(
-            path: AdminSection.artisans.path,
-            builder: (_, _) =>
-                const AdminDashboardScreen(section: AdminSection.artisans),
-          ),
-          GoRoute(
-            path: AdminSection.jobs.path,
-            builder: (_, _) =>
-                const AdminDashboardScreen(section: AdminSection.jobs),
-          ),
-          GoRoute(
-            path: AdminSection.verifications.path,
-            builder: (_, _) =>
-                const AdminDashboardScreen(section: AdminSection.verifications),
-          ),
-          GoRoute(
-            path: AdminSection.disputes.path,
-            builder: (_, _) =>
-                const AdminDashboardScreen(section: AdminSection.disputes),
-          ),
-          GoRoute(
-            path: AdminSection.reviews.path,
-            builder: (_, _) =>
-                const AdminDashboardScreen(section: AdminSection.reviews),
-          ),
-          GoRoute(
-            path: AdminSection.support.path,
-            builder: (_, _) =>
-                const AdminDashboardScreen(section: AdminSection.support),
-          ),
-          GoRoute(
-            path: AdminSection.deletions.path,
-            builder: (_, _) =>
-                const AdminDashboardScreen(section: AdminSection.deletions),
-          ),
-          GoRoute(
-            path: AdminSection.auditLogs.path,
-            builder: (_, _) =>
-                const AdminDashboardScreen(section: AdminSection.auditLogs),
-          ),
-          GoRoute(
-            path: AdminSection.analytics.path,
-            builder: (_, _) =>
-                const AdminDashboardScreen(section: AdminSection.analytics),
-          ),
-          GoRoute(
-            path: AdminSection.settings.path,
-            builder: (_, _) =>
-                const AdminDashboardScreen(section: AdminSection.settings),
-          ),
+          for (final section in AdminSection.values)
+            GoRoute(path: section.path, builder: (_, _) => _adminSection(section)),
         ],
       ),
       GoRoute(
@@ -521,3 +478,20 @@ class _RoleAware extends ConsumerWidget {
     return artisanMode ? artisan : customer;
   }
 }
+
+/// Stage 8.2 admin sections (rebuilt presentation in lib/ui/admin).
+Widget _adminSection(AdminSection s) => switch (s) {
+      AdminSection.dashboard => const AdminDashboardSection(),
+      AdminSection.analytics => const AdminAnalyticsSection(),
+      AdminSection.users => const AdminUsersSection(),
+      AdminSection.artisans => const AdminArtisansSection(),
+      AdminSection.verifications => const AdminVerificationsSection(),
+      AdminSection.jobs => const AdminJobsSection(),
+      AdminSection.disputes => const AdminDisputesSection(),
+      AdminSection.support => const AdminSupportSection(),
+      AdminSection.reviews => const AdminReviewsSection(),
+      AdminSection.deletions => const AdminDeletionsSection(),
+      AdminSection.finance => const AdminFinanceSection(),
+      AdminSection.auditLogs => const AdminAuditLogsSection(),
+      AdminSection.settings => const AdminSettingsSection(),
+    };

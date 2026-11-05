@@ -1,3 +1,4 @@
+import '../../core/validation/password_policy.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -185,9 +186,9 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                           onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
                         ),
                         validator: (v) {
-                          if (v == null || v.length < 8) return 'Password must be at least 8 characters';
-                          if (!v.contains(RegExp(r'[A-Z]'))) return 'Include at least one uppercase letter';
-                          if (!v.contains(RegExp(r'[0-9]'))) return 'Include at least one number';
+                          // Q-3: the shared policy for every new or changed password.
+                          final problem = PasswordPolicy.validate(v);
+                          if (problem != null) return problem;
                           return null;
                         },
                       ),

@@ -56,6 +56,11 @@ class AdminAuditLogModel {
   final DateTime timestamp;
   final Map<String, dynamic> metadata;
 
+  /// Stage 8.2: the action string exactly as recorded. Cloud Functions write
+  /// actions outside [AdminAction] (e.g. payoutFrozen, chargeRefunded);
+  /// those parse to [AdminAction.adminOverride], so the audit log shows this.
+  final String actionId;
+
   const AdminAuditLogModel({
     required this.id,
     required this.action,
@@ -64,6 +69,7 @@ class AdminAuditLogModel {
     required this.targetType,
     required this.timestamp,
     this.metadata = const {},
+    this.actionId = '',
   });
 
   factory AdminAuditLogModel.fromJson(Map<String, dynamic> json) =>
@@ -75,6 +81,7 @@ class AdminAuditLogModel {
         targetType: json['targetType'] as String? ?? '',
         timestamp: _toDate(json['timestamp']),
         metadata: Map<String, dynamic>.from((json['metadata'] as Map?) ?? {}),
+        actionId: json['action'] as String? ?? '',
       );
 
   Map<String, dynamic> toJson() => {

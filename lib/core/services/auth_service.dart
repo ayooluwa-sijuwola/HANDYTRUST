@@ -1,3 +1,4 @@
+import '../validation/password_policy.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
@@ -165,7 +166,8 @@ class AuthService implements IAuthService {
       case 'invalid-email':
         return 'Please enter a valid email address.';
       case 'weak-password':
-        return 'Password must be at least 6 characters.';
+        // Q-3: one rule for new and changed passwords.
+        return PasswordPolicy.summary;
       case 'user-not-found':
       case 'wrong-password':
       case 'invalid-credential':

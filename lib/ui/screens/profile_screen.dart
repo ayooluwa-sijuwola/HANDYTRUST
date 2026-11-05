@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../../models/user_model.dart';
+import '../../providers/chat_provider.dart';
 import '../../providers/artisan_provider.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/escrow_provider.dart';
@@ -90,6 +91,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
           data: (user) {
             if (user == null) return const HtLoadingView();
             final artisanMode = user.isArtisan && user.activeRole == 'artisan';
+            final unreadChats = ref.watch(unreadMessagesTotalProvider((uid: user.uid, asArtisan: false)));
             final artisan = user.isArtisan ? ref.watch(artisanProfileProvider(user.uid)).asData?.value : null;
             final jobs = artisanMode ? null : ref.watch(customerJobsProvider(user.uid)).asData?.value;
             final active = jobs?.where((j) => !j.status.isTerminal).length;
@@ -196,7 +198,14 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                           trailing: (active ?? 0) > 0 ? HtStatusPill(label: '$active Active', tone: HtTone.accent) : null,
                           onTap: () => _openJobs(user),
                         ),
-                        HtMenuRow(icon: Icons.chat_bubble_outline_rounded, title: 'My Chats', subtitle: 'Messages with artisans and customers', onTap: () => context.push('/my-chats')),
+                        HtMenuRow(
+                          icon: Icons.chat_bubble_outline_rounded,
+                          title: 'My Chats',
+                          subtitle: 'Messages with artisans',
+                          // Stage 8.2: customer-side conversations only (role-separated).
+                          trailing: unreadChats > 0 ? HtStatusPill(label: '$unreadChats unread', tone: HtTone.accent) : null,
+                          onTap: () => context.push('/my-chats'),
+                        ),
                         // Stage 8.1: artisan reviews, earnings and verification
                         // live in the artisan experience (Artisan Mode).
                         if (!artisanMode)
@@ -206,9 +215,10 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                             subtitle: 'Escrow payments and refunds',
                             onTap: () => widget.standalone ? context.push('/wallet') : ref.read(customerTabProvider.notifier).state = CustomerTab.wallet,
                           ),
-                        HtMenuRow(icon: Icons.badge_outlined, title: 'Account Information', subtitle: 'Personal details and email', onTap: () => context.push('/settings')),
-                        HtMenuRow(icon: Icons.lock_outline_rounded, title: 'Security & Password', onTap: () => context.push('/settings')),
-                        HtMenuRow(icon: Icons.notifications_active_outlined, title: 'Notification Settings', onTap: () => context.push('/settings')),
+                        // Stage 8.2: each row opens its own destination.
+                        HtMenuRow(icon: Icons.badge_outlined, title: 'Account Information', subtitle: 'Personal details and email', onTap: () => context.push('/settings/personal')),
+                        HtMenuRow(icon: Icons.lock_outline_rounded, title: 'Security & Password', onTap: () => context.push('/settings/security')),
+                        HtMenuRow(icon: Icons.notifications_active_outlined, title: 'Notification Settings', onTap: () => context.push('/settings/notifications')),
                         HtMenuRow(
                           icon: Icons.dark_mode_outlined,
                           title: 'Obsidian Dark Mode',

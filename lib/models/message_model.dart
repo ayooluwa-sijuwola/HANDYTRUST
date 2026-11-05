@@ -12,6 +12,12 @@ class MessageModel {
   final String? imageUrl;
   final double? proposedAmount;
   final bool isRead;
+
+  /// Stage 8.2: true while the message exists only in the local Firestore
+  /// cache (`hasPendingWrites`), i.e. not yet acknowledged by the server.
+  /// Never serialised; set by ChatService from snapshot metadata so the UI
+  /// can show "Sending" instead of a false "Sent".
+  final bool isPending;
   final DateTime createdAt;
 
   const MessageModel({
@@ -25,6 +31,7 @@ class MessageModel {
     this.proposedAmount,
     this.isRead = false,
     required this.createdAt,
+    this.isPending = false,
   });
 
   factory MessageModel.fromJson(Map<String, dynamic> json) {
@@ -52,6 +59,22 @@ class MessageModel {
       createdAt: created,
     );
   }
+
+  MessageModel withPending(bool pending) => pending == isPending
+      ? this
+      : MessageModel(
+          id: id,
+          jobId: jobId,
+          senderId: senderId,
+          receiverId: receiverId,
+          text: text,
+          type: type,
+          imageUrl: imageUrl,
+          proposedAmount: proposedAmount,
+          isRead: isRead,
+          createdAt: createdAt,
+          isPending: pending,
+        );
 
   Map<String, dynamic> toJson() => {
         'id': id,

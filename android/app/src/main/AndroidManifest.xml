@@ -19,6 +19,12 @@
         android:label="handy_trust"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
+        <!-- Stage 8.2: notifications FCM shows while the app is in the
+             background use the app's own high-importance channel (created by
+             LocalNotificationService) instead of FCM's fallback channel. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="handy_trust_main" />
         <activity
             android:name=".MainActivity"
             android:exported="true"

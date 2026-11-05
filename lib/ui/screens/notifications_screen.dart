@@ -44,11 +44,9 @@ class _NotificationsScreenState extends ConsumerState<NotificationsScreen> {
       }
     }
     if (!mounted) return;
-    if (n.route != null) {
-      context.push(safeNotificationRoute(n.route));
-    } else if (n.jobId != null && n.jobId!.isNotEmpty) {
-      context.push('/job/${n.jobId}');
-    }
+    // Stage 8.2: same destination rules as push taps (a new-message
+    // notification opens the conversation, not the job page).
+    context.push(notificationDestination(n));
   }
 
   @override
@@ -136,7 +134,7 @@ class _NotificationsScreenState extends ConsumerState<NotificationsScreen> {
                         icon: Icons.tune_rounded,
                         title: 'Manage Notification Settings',
                         subtitle: 'Push alerts and preferences',
-                        onTap: () => context.push('/settings'),
+                        onTap: () => context.push('/settings/notifications'),
                       ),
                     ),
                   ),

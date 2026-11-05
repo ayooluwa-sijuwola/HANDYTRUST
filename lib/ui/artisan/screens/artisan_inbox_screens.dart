@@ -4,8 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/services/artisan_work_logic.dart';
+import '../../../core/services/conversation_logic.dart';
 import '../../../core/services/notification_category.dart';
-import '../../../models/job_model.dart';
 import '../../../models/message_model.dart';
 import '../../../models/notification_model.dart';
 import '../../../providers/chat_provider.dart';
@@ -19,9 +19,10 @@ import '../artisan_shell.dart';
 import '../components/pro_components.dart';
 import 'work_ui.dart';
 
-/// SH-03 (artisan) Messages: conversations by job, with the job's stage,
-/// last message and unread count. Same data as the previous chat list
-/// (`artisanChatJobsProvider`, `lastMessageProvider`, `chatUnreadCountProvider`).
+/// SH-03 (artisan) Messages: the artisan's conversations (assigned jobs
+/// and pre-booking chats on open jobs), last message, per-conversation
+/// unread count. Stage 8.2: discovery and counts use rules-safe per-job
+/// queries (`conversationViewsProvider`).
 class ArtisanMessagesScreen extends ConsumerStatefulWidget {
   const ArtisanMessagesScreen({super.key});
   @override
@@ -40,30 +41,30 @@ class _ArtisanMessagesScreenState extends ConsumerState<ArtisanMessagesScreen> {
   Widget build(BuildContext context) {
     final ctx = ref.watch(artisanContextProvider).asData?.value;
     if (ctx == null) return const ArtisanPage(title: 'Messages', children: [SizedBox(height: 80), HtLoadingView()]);
-    final jobsAsync = ref.watch(artisanChatJobsProvider(ctx.uid));
+    final viewsAsync = ref.watch(conversationViewsProvider((uid: ctx.uid, asArtisan: true)));
     return ArtisanPage(
       title: 'Messages',
       children: [
-        HtSearchField(controller: _search, hint: 'Search jobs or areas', onChanged: (_) => setState(() {})),
+        HtSearchField(controller: _search, hint: 'Search jobs, areas or messages', onChanged: (_) => setState(() {})),
         const SizedBox(height: 6),
-        jobsAsync.when(
+        viewsAsync.when(
           loading: () => const Padding(padding: EdgeInsets.only(top: 40), child: HtLoadingView(label: 'Loading conversations…')),
           error: (e, _) => ArtisanState.error(e, onRetry: () => ref.invalidate(artisanJobsProvider(ctx.uid))),
-          data: (jobs) {
-            final q = _search.text.trim().toLowerCase();
-            final list = jobs
-                .where((j) => j.status != JobStatus.requested)
-                .where((j) => q.isEmpty || j.description.toLowerCase().contains(q) || j.category.toLowerCase().contains(q) || (j.areaLabel ?? '').toLowerCase().contains(q))
-                .toList();
+          data: (views) {
+            final list = ConversationLogic.search(views, _search.text);
             if (list.isEmpty) {
-              return const Padding(
-                padding: EdgeInsets.only(top: 18),
-                child: HtCard(child: HtEmptyView(icon: Icons.forum_outlined, title: 'No conversations yet', message: 'Chats with customers appear here once you’re booked or message about a job.')),
+              return Padding(
+                padding: const EdgeInsets.only(top: 18),
+                child: HtCard(
+                  child: HtEmptyView(
+                    icon: Icons.forum_outlined,
+                    title: views.isEmpty ? 'No conversations yet' : 'No matches',
+                    message: views.isEmpty ? 'Chats with customers appear here once you’re booked or message about a job.' : 'Try a different search.',
+                  ),
+                ),
               );
             }
-            final rows = [for (final j in list) (j, ref.watch(lastMessageProvider(ChatThreadKey(jobId: j.id, viewerId: ctx.uid, otherPartyId: j.customerId))).asData?.value)];
-            rows.sort((a, b) => (b.$2?.createdAt ?? b.$1.createdAt).compareTo(a.$2?.createdAt ?? a.$1.createdAt));
-            return Column(children: [for (final (j, m) in rows) _ConversationRow(job: j, last: m, viewerId: ctx.uid)]);
+            return Column(children: [for (final v in list) _ConversationRow(view: v)]);
           },
         ),
       ],
@@ -71,19 +72,19 @@ class _ArtisanMessagesScreenState extends ConsumerState<ArtisanMessagesScreen> {
   }
 }
 
-class _ConversationRow extends ConsumerWidget {
-  const _ConversationRow({required this.job, required this.last, required this.viewerId});
-  final JobModel job;
-  final MessageModel? last;
-  final String viewerId;
+class _ConversationRow extends StatelessWidget {
+  const _ConversationRow({required this.view});
+  final ConversationView view;
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final p = context.ht;
-    final unread = ref.watch(chatUnreadCountProvider((jobId: job.id, userId: viewerId))).asData?.value ?? 0;
+    final job = view.ref.job;
+    final last = view.last;
+    final unread = view.unread;
     final stage = ArtisanWorkLogic.stageOf(job);
-    final preview = last == null ? 'No messages yet' : (last!.type == MessageType.image ? 'Photo' : last!.text);
+    final preview = last == null ? 'No messages yet' : (last.type == MessageType.image ? 'Photo' : last.text);
     return InkWell(
-      onTap: () => context.push('/chat/${job.id}', extra: {'artisanId': job.customerId, 'artisanName': 'Customer'}),
+      onTap: () => context.push('/chat/${job.id}?with=${view.ref.otherPartyId}', extra: {'artisanId': view.ref.otherPartyId, 'artisanName': 'Customer'}),
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 12),
         decoration: BoxDecoration(border: Border(bottom: BorderSide(color: p.border))),
@@ -94,7 +95,7 @@ class _ConversationRow extends ConsumerWidget {
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Row(children: [
                 Expanded(child: Text(workTitle(job), style: HtType.bodyStrong(p.textPrimary).copyWith(fontSize: 14), maxLines: 1, overflow: TextOverflow.ellipsis)),
-                if (last != null) Text(HtFormat.timeAgo(last!.createdAt), style: HtType.small(p.textMuted).copyWith(fontSize: 11)),
+                if (last != null) Text(HtFormat.timeAgo(last.createdAt, now: clock.now()), style: HtType.small(p.textMuted).copyWith(fontSize: 11)),
               ]),
               Text(preview, style: HtType.small(unread > 0 ? p.textPrimary : p.textSecondary).copyWith(fontWeight: unread > 0 ? FontWeight.w600 : null), maxLines: 1, overflow: TextOverflow.ellipsis),
               const SizedBox(height: 5),
@@ -157,8 +158,9 @@ class _ArtisanNotificationsScreenState extends ConsumerState<ArtisanNotification
       }
     }
     if (!mounted) return;
-    final route = n.route ?? (n.jobId != null ? '/job/${n.jobId}' : null);
-    if (route != null) context.push(safeNotificationRoute(route));
+    // Stage 8.2: same destination rules as push taps (messages open the
+    // conversation).
+    context.push(notificationDestination(n));
   }
 
   @override
@@ -238,7 +240,7 @@ class _ArtisanNotificationsScreenState extends ConsumerState<ArtisanNotification
               if (today.isNotEmpty) ...[const ProSection('Today'), for (final n in today) row(n)],
               if (earlier.isNotEmpty) ...[const ProSection('Earlier'), for (final n in earlier) row(n)],
               const SizedBox(height: 14),
-              HtSecondaryButton(label: 'Notification settings', icon: Icons.tune_rounded, onPressed: () => context.push('/settings')),
+              HtSecondaryButton(label: 'Notification settings', icon: Icons.tune_rounded, onPressed: () => context.push('/settings/notifications')),
             ]);
           },
         ),

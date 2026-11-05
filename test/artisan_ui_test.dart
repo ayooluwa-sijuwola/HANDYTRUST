@@ -134,7 +134,9 @@ List<Override> _overrides({
     verificationStatusProvider.overrideWith((ref, id) => Stream.value(null)),
     portfolioProjectsProvider.overrideWith((ref, id) => Stream.value(const <PortfolioProjectModel>[])),
     portfolioViewCountProvider.overrideWith((ref, id) => Stream.value(0)),
-    messagesUnreadCountProvider.overrideWith((ref, id) => Stream.value(2)),
+    // Stage 8.2: role-separated totals from per-conversation counts.
+    unreadMessagesTotalProvider.overrideWith((ref, k) => 2),
+    jobCounterpartsProvider.overrideWith((ref, k) => Stream.value(const <String>{})),
     unreadNotificationCountProvider.overrideWith((ref) => Stream.value(1)),
     userNotificationsProvider.overrideWith((ref) => Stream.value(const <NotificationModel>[])),
     openJobsFeedProvider.overrideWith((ref, cat) => Stream.value(openJobs)),
@@ -142,7 +144,7 @@ List<Override> _overrides({
     jobStreamProvider.overrideWith((ref, id) => Stream.value(allJobs[id])),
     jobPrivateLocationProvider.overrideWith((ref, id) => Stream.value(null)),
     disputeForJobProvider.overrideWith((ref, id) => Stream.value(null)),
-    chatUnreadCountProvider.overrideWith((ref, key) => Stream.value(0)),
+    pairUnreadCountProvider.overrideWith((ref, key) => Stream.value(0)),
     // Customer side (dual-role users in Customer Mode).
     customerJobsProvider.overrideWith((ref, id) => Stream.value(const <JobModel>[])),
     customerPaymentsProvider.overrideWith((ref, id) => Stream.value(const <PaymentModel>[])),

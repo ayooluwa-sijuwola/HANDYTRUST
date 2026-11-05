@@ -119,7 +119,8 @@ class ArtisanTabHeader extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final ctx = ref.watch(artisanContextProvider).asData?.value;
     if (ctx == null) return const SizedBox(height: 64);
-    final messages = ref.watch(messagesUnreadCountProvider(ctx.uid)).asData?.value ?? 0;
+    // Stage 8.2: artisan-side conversations only (role-separated).
+    final messages = ref.watch(unreadMessagesTotalProvider((uid: ctx.uid, asArtisan: true)));
     final alerts = ref.watch(unreadNotificationCountProvider).asData?.value ?? 0;
     return ProHeader(
       name: ctx.name,

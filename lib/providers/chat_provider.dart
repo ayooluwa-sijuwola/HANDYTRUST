@@ -3,38 +3,22 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/services/chat_service.dart';
+import '../core/services/conversation_logic.dart';
 import '../core/services/job_service.dart';
 import '../core/services/notification_service.dart';
 import '../core/services/storage_service.dart';
-import '../core/utils/safe_firestore.dart';
 import '../models/audit_log_model.dart';
 import '../models/job_model.dart';
 import '../models/job_mutation_context.dart';
 import '../models/message_model.dart';
+import 'artisan_provider.dart';
 import 'escrow_provider.dart';
+import 'quote_provider.dart';
 import 'job_service_provider.dart';
 
 final chatServiceProvider = Provider<ChatService>(
   (ref) => ChatService(FirebaseFirestore.instance, NotificationService(FirebaseFirestore.instance)),
 );
-
-/// Live total unread messages across all jobs for a user (collectionGroup).
-final messagesUnreadCountProvider = StreamProvider.family<int, String>((ref, userId) {
-  try {
-    return FirebaseFirestore.instance
-        .collectionGroup('messages')
-        .where('receiverId', isEqualTo: userId)
-        .where('isRead', isEqualTo: false)
-        .snapshots()
-        .map((s) => s.docs.length)
-        .handleError((e) {
-      debugPrint('[chat_provider] messagesUnreadCount stream error: $e');
-    });
-  } catch (e) {
-    debugPrint('[chat_provider] messagesUnreadCount failed to create stream: $e');
-    return Stream.value(0);
-  }
-});
 
 /// Real-time message stream for a job, scoped to one specific counterpart
 /// — see ChatService.messagesStream's doc comment for why an unscoped
@@ -96,82 +80,72 @@ final lastMessageProvider =
       );
 });
 
-/// Live unread count for [userId] in a job's thread.
-final chatUnreadCountProvider = StreamProvider.family<int,
-    ({String jobId, String userId})>((ref, key) {
-  return ref.watch(chatServiceProvider).watchUnreadCount(key.jobId, key.userId);
+// ─── Conversations (Stage 8.2) ──────────────────────────────────────────────
+// Conversation discovery and unread totals use per-job, rules-safe queries.
+// The previous collectionGroup('messages') queries are denied by
+// firestore.rules (no recursive `{path=**}/messages` rule; verified on the
+// emulator), so header badges always read 0 and artisans' pre-booking
+// threads never appeared.
+
+/// Everyone [viewerId] has exchanged messages with on one job.
+final jobCounterpartsProvider = StreamProvider.family<Set<String>, ({String jobId, String viewerId})>(
+  (ref, k) => ref.watch(chatServiceProvider).watchCounterparts(k.jobId, viewerId: k.viewerId),
+);
+
+/// Unread messages in ONE conversation.
+final pairUnreadCountProvider = StreamProvider.family<int, ChatThreadKey>(
+  (ref, k) => ref.watch(chatServiceProvider).watchPairUnreadCount(k.jobId, viewerId: k.viewerId, otherPartyId: k.otherPartyId),
+);
+
+Map<String, Set<String>> _counterpartsFor(Ref ref, Iterable<JobModel> jobs, String uid) => {
+      for (final j in jobs) j.id: ref.watch(jobCounterpartsProvider((jobId: j.id, viewerId: uid))).asData?.value ?? const <String>{},
+    };
+
+bool _needsDiscovery(JobModel j) =>
+    j.status == JobStatus.requested || j.status == JobStatus.cancelled || j.status == JobStatus.expired;
+
+/// The customer's conversations (viewer = the job's customer).
+final customerConversationsProvider = Provider.family<AsyncValue<List<ConversationRef>>, String>((ref, uid) {
+  return ref.watch(customerJobsProvider(uid)).whenData((jobs) {
+    final counterparts = _counterpartsFor(ref, jobs.where(_needsDiscovery), uid);
+    return ConversationLogic.forCustomer(uid, jobs, counterparts);
+  });
 });
 
-/// Distinct job IDs this artisan has personally sent at least one message
-/// on — captures pre-match "interested" chats (started from the Open Jobs
-/// Feed) that may never result in a match. Matched jobs are already
-/// covered by [artisanJobsProvider]; this only adds jobs not yet matched
-/// to this artisan. A single equality filter on a collectionGroup query
-/// needs no composite index.
-final _artisanMessagedJobIdsProvider =
-    StreamProvider.family<Set<String>, String>((ref, artisanId) {
-  return safeStream(
-    FirebaseFirestore.instance
-        .collectionGroup('messages')
-        .where('senderId', isEqualTo: artisanId),
-    (d) => d.data()['jobId'] as String? ?? '',
-    debugLabel: 'artisanMessagedJobIds:$artisanId',
-  ).map((ids) => ids.where((id) => id.isNotEmpty).toSet());
+/// The artisan's conversations (viewer = the artisan): assigned jobs, plus
+/// open jobs in their feed where they have exchanged messages.
+final artisanConversationsProvider = Provider.family<AsyncValue<List<ConversationRef>>, String>((ref, uid) {
+  final category = ref.watch(artisanProfileProvider(uid)).asData?.value?.category;
+  final open = (category == null || category.isEmpty)
+      ? const <JobModel>[]
+      : ref.watch(openJobsFeedProvider(category)).asData?.value ?? const <JobModel>[];
+  return ref.watch(artisanJobsProvider(uid)).whenData((assigned) {
+    final counterparts = _counterpartsFor(ref, [...assigned.where(_needsDiscovery), ...open], uid);
+    return ConversationLogic.forArtisan(uid, assigned, open, counterparts);
+  });
 });
 
-/// Fetches job docs for a fixed set of ids — used to hydrate pre-match
-/// chat jobs not already covered by [artisanJobsProvider]. Keyed by a
-/// sorted, joined id string so Riverpod caches repeat lookups for the
-/// same set instead of refetching on every snapshot tick (same pattern as
-/// admin_dashboard_screen.dart's `_jobPeopleNamesProvider`).
-final _jobsByIdsProvider =
-    FutureProvider.family<List<JobModel>, String>((ref, idsKey) async {
-  if (idsKey.isEmpty) return const [];
-  final ids = idsKey.split(',');
-  final snap = await FirebaseFirestore.instance
-      .collection('jobs')
-      .where(FieldPath.documentId, whereIn: ids)
-      .get();
-  return snap.docs.map((d) => JobModel.fromJson({...d.data(), 'id': d.id})).toList();
+/// Conversations with their last message and unread count, newest first.
+/// Role-separated: [asArtisan] picks which side of the user's account.
+final conversationViewsProvider = Provider.family<AsyncValue<List<ConversationView>>, ({String uid, bool asArtisan})>((ref, k) {
+  final refs = k.asArtisan ? ref.watch(artisanConversationsProvider(k.uid)) : ref.watch(customerConversationsProvider(k.uid));
+  return refs.whenData((list) => ConversationLogic.sorted([
+        for (final c in list)
+          ConversationView(
+            ref: c,
+            last: ref.watch(lastMessageProvider(ChatThreadKey(jobId: c.job.id, viewerId: c.viewerId, otherPartyId: c.otherPartyId))).asData?.value,
+            unread: ref.watch(pairUnreadCountProvider(ChatThreadKey(jobId: c.job.id, viewerId: c.viewerId, otherPartyId: c.otherPartyId))).asData?.value ?? 0,
+          ),
+      ]));
 });
 
-/// Every job this artisan has a chat thread on: matched jobs (post-
-/// acceptance, via [artisanJobsProvider]) plus any still-open job they
-/// personally messaged about pre-match. Combined client-side from two
-/// independent signals — matched jobs come from `jobs.artisanId`,
-/// pre-match chats from `messages.senderId` — rather than one query,
-/// because nothing in this data model links them otherwise. Degrades
-/// gracefully: if the pre-match signal errors or is still loading, the
-/// matched-jobs list is shown on its own rather than blocking the whole
-/// screen on a secondary signal.
-final artisanChatJobsProvider =
-    Provider.family<AsyncValue<List<JobModel>>, String>((ref, artisanId) {
-  final matchedAsync = ref.watch(artisanJobsProvider(artisanId));
-
-  return matchedAsync.when(
-    loading: () => const AsyncValue.loading(),
-    error: (e, st) => AsyncValue.error(e, st),
-    data: (matched) {
-      final messagedIdsAsync = ref.watch(_artisanMessagedJobIdsProvider(artisanId));
-      return messagedIdsAsync.when(
-        loading: () => AsyncValue.data(matched),
-        error: (_, _) => AsyncValue.data(matched),
-        data: (messagedIds) {
-          final matchedIds = matched.map((j) => j.id).toSet();
-          final extraIds = messagedIds.difference(matchedIds);
-          if (extraIds.isEmpty) return AsyncValue.data(matched);
-
-          final extraKey = (extraIds.toList()..sort()).join(',');
-          final extraAsync = ref.watch(_jobsByIdsProvider(extraKey));
-          return extraAsync.when(
-            loading: () => AsyncValue.data(matched),
-            error: (_, _) => AsyncValue.data(matched),
-            data: (extraJobs) => AsyncValue.data([...matched, ...extraJobs]),
-          );
-        },
-      );
-    },
-  );
+/// Total unread messages for one side of the account (header badge).
+final unreadMessagesTotalProvider = Provider.family<int, ({String uid, bool asArtisan})>((ref, k) {
+  final refs = (k.asArtisan ? ref.watch(artisanConversationsProvider(k.uid)) : ref.watch(customerConversationsProvider(k.uid))).asData?.value ?? const [];
+  return ConversationLogic.totalUnread([
+    for (final c in refs)
+      ref.watch(pairUnreadCountProvider(ChatThreadKey(jobId: c.job.id, viewerId: c.viewerId, otherPartyId: c.otherPartyId))).asData?.value ?? 0,
+  ]);
 });
 
 /// Send-state notifier — tracks in-flight send operations.

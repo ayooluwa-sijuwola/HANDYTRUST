@@ -280,6 +280,11 @@ class JobModel {
   /// Useful for debugging concurrent write issues.
   final int updateVersion;
 
+  /// Q-5 (Stage 8.2): server-written payout freeze (`adminSetPayoutFreeze`),
+  /// parsed for read-only admin display; never serialised by the client.
+  final bool payoutFrozen;
+  final String? payoutFreezeReason;
+
   const JobModel({
     required this.id,
     required this.customerId,
@@ -353,6 +358,8 @@ class JobModel {
     this.lastUpdatedAt,
     this.lastUpdatedBy,
     this.updateVersion = 0,
+    this.payoutFrozen = false,
+    this.payoutFreezeReason,
   });
 
   factory JobModel.fromJson(Map<String, dynamic> json) => JobModel(
@@ -436,6 +443,8 @@ class JobModel {
         lastUpdatedAt: _toDateNullable(json['lastUpdatedAt']),
         lastUpdatedBy: json['lastUpdatedBy'] as String?,
         updateVersion: (json['updateVersion'] as int?) ?? 0,
+        payoutFrozen: json['payoutFrozen'] == true,
+        payoutFreezeReason: json['payoutFreezeReason'] as String?,
       );
 
   static DateTime _toDate(dynamic v) {
@@ -595,5 +604,7 @@ class JobModel {
         cancelledBy: cancelledBy ?? this.cancelledBy,
         cancellationReason: cancellationReason ?? this.cancellationReason,
         cancelledAt: cancelledAt ?? this.cancelledAt,
+        payoutFrozen: payoutFrozen,
+        payoutFreezeReason: payoutFreezeReason,
       );
 }

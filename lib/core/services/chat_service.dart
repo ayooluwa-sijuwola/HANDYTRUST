@@ -16,6 +16,13 @@ class ChatService {
   CollectionReference<Map<String, dynamic>> _messages(String jobId) =>
       _db.collection('jobs').doc(jobId).collection('messages');
 
+  static MessageModel _fromDoc(QueryDocumentSnapshot<Map<String, dynamic>> d) =>
+      MessageModel.fromJson({...d.data(), 'id': d.id}).withPending(d.metadata.hasPendingWrites);
+
+  /// In-flight read-marking batches, so repeated snapshots can't send
+  /// duplicate read writes for the same conversation (Stage 8.2).
+  final Set<String> _markingRead = {};
+
   // Firestore evaluates security-rule `read`/`list` operations against a
   // query's own `where` clauses, not per-returned-document — a query with
   // no `where` clause at all is only provably safe under firestore.rules'
@@ -61,9 +68,11 @@ class ChatService {
       _messages(jobId)
           .where('senderId', isEqualTo: viewerId)
           .where('receiverId', isEqualTo: otherPartyId)
-          .snapshots()
+          // Stage 8.2: metadata changes so a message flips from "Sending"
+          // to "Sent" only once the server has acknowledged the write.
+          .snapshots(includeMetadataChanges: true)
           .listen((s) {
-        sent = s.docs.map((d) => MessageModel.fromJson({...d.data(), 'id': d.id})).toList();
+        sent = s.docs.map(_fromDoc).toList();
         haveSent = true;
         emit();
       }, onError: (Object e) {
@@ -78,7 +87,7 @@ class ChatService {
           .where('receiverId', isEqualTo: viewerId)
           .snapshots()
           .listen((s) {
-        received = s.docs.map((d) => MessageModel.fromJson({...d.data(), 'id': d.id})).toList();
+        received = s.docs.map(_fromDoc).toList();
         haveReceived = true;
         emit();
       }, onError: (Object e) {
@@ -142,23 +151,6 @@ class ChatService {
   }) =>
       _pairStream(jobId, viewerId: viewerId, otherPartyId: otherPartyId)
           .map((list) => list.isEmpty ? null : list.last);
-
-  /// Live unread count for [userId] in a job's thread — unlike [unreadCount]
-  /// below (a one-shot read), this updates automatically as messages are
-  /// read/received, for the "My Chats" list badge.
-  Stream<int> watchUnreadCount(String jobId, String userId) => _messages(jobId)
-      .where('receiverId', isEqualTo: userId)
-      .where('isRead', isEqualTo: false)
-      .snapshots()
-      .map((s) => s.docs.length)
-      .transform(
-        StreamTransformer<int, int>.fromHandlers(
-          handleError: (Object error, StackTrace stackTrace, sink) {
-            debugPrint('[ChatService] watchUnreadCount stream error for job $jobId: $error');
-            sink.add(0);
-          },
-        ),
-      );
 
   // Stage 6 (HT-015): the "new message" notification is generated
   // server-side by the onMessageCreated trigger (functions/index.js).
@@ -249,17 +241,70 @@ class ChatService {
   /// sites anywhere in the app (confirmed by an exhaustive search during
   /// this investigation) — nothing ever invoked it. Called from
   /// ChatScreen when a conversation is opened/new messages arrive.
-  Future<void> markAllAsRead(String jobId, {required String viewerId}) async {
-    final snap = await _messages(jobId)
-        .where('receiverId', isEqualTo: viewerId)
-        .where('isRead', isEqualTo: false)
-        .get();
-    if (snap.docs.isEmpty) return;
-    final batch = _db.batch();
-    for (final doc in snap.docs) {
-      batch.update(doc.reference, {'isRead': true});
+  Future<void> markAllAsRead(String jobId, {required String viewerId, String? otherPartyId}) async {
+    // Stage 8.2: scoped to ONE conversation. On an open job several
+    // artisans can message the same customer; marking by receiver alone
+    // cleared the other artisans' unread messages too.
+    final key = '$jobId|$viewerId|${otherPartyId ?? '*'}';
+    if (!_markingRead.add(key)) return;
+    try {
+      var q = _messages(jobId).where('receiverId', isEqualTo: viewerId);
+      if (otherPartyId != null) q = q.where('senderId', isEqualTo: otherPartyId);
+      final snap = await q.where('isRead', isEqualTo: false).get();
+      if (snap.docs.isEmpty) return;
+      final batch = _db.batch();
+      for (final doc in snap.docs) {
+        batch.update(doc.reference, {'isRead': true});
+      }
+      await batch.commit();
+    } finally {
+      _markingRead.remove(key);
     }
-    await batch.commit();
+  }
+
+  /// Live unread count in ONE conversation (messages from [otherPartyId]
+  /// to [viewerId] not yet read). Per-job, rules-safe query: the
+  /// collection-group alternative is denied by firestore.rules.
+  Stream<int> watchPairUnreadCount(String jobId, {required String viewerId, required String otherPartyId}) => _messages(jobId)
+      .where('receiverId', isEqualTo: viewerId)
+      .where('senderId', isEqualTo: otherPartyId)
+      .where('isRead', isEqualTo: false)
+      .snapshots()
+      .map((s) => s.docs.length)
+      .transform(StreamTransformer<int, int>.fromHandlers(handleError: (Object e, StackTrace st, sink) {
+        debugPrint('[ChatService] watchPairUnreadCount error for job $jobId: $e');
+        sink.addError(e, st);
+      }));
+
+  /// Everyone [viewerId] has exchanged messages with on a job, for jobs the
+  /// viewer may query by sender/receiver (job parties, and pre-booking
+  /// artisans for their own messages). Two rules-safe queries, merged.
+  Stream<Set<String>> watchCounterparts(String jobId, {required String viewerId}) {
+    final controller = StreamController<Set<String>>.broadcast();
+    var fromMe = <String>{};
+    var toMe = <String>{};
+    var haveFrom = false, haveTo = false;
+    void emit() {
+      if (haveFrom && haveTo) controller.add({...fromMe, ...toMe}..remove(viewerId)..remove(''));
+    }
+    final subs = <StreamSubscription>[
+      _messages(jobId).where('senderId', isEqualTo: viewerId).snapshots().listen((s) {
+        fromMe = s.docs.map((d) => d.data()['receiverId'] as String? ?? '').toSet();
+        haveFrom = true;
+        emit();
+      }, onError: controller.addError),
+      _messages(jobId).where('receiverId', isEqualTo: viewerId).snapshots().listen((s) {
+        toMe = s.docs.map((d) => d.data()['senderId'] as String? ?? '').toSet();
+        haveTo = true;
+        emit();
+      }, onError: controller.addError),
+    ];
+    controller.onCancel = () async {
+      for (final s in subs) {
+        await s.cancel();
+      }
+    };
+    return controller.stream;
   }
 
   Future<int> unreadCount(String jobId, String userId) async {

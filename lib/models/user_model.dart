@@ -30,6 +30,12 @@ class UserModel {
   /// True when the user has submitted an account deletion request.
   final bool accountDeletionRequested;
 
+  /// Q-5 (Stage 8.2): server-written payout freeze, parsed for read-only
+  /// display. Written only by the `adminSetPayoutFreeze` Cloud Function;
+  /// never serialised by the client.
+  final bool payoutFrozen;
+  final String? payoutFreezeReason;
+
   UserModel({
     required this.uid,
     required this.name,
@@ -47,6 +53,8 @@ class UserModel {
     this.accountStatus = 'active',
     this.suspensionType,
     this.accountDeletionRequested = false,
+    this.payoutFrozen = false,
+    this.payoutFreezeReason,
   })  : roles = roles ?? const ['customer'],
         activeRole = activeRole ?? (roles?.first ?? 'customer'),
         createdAt = createdAt ?? DateTime.now();
@@ -110,6 +118,8 @@ class UserModel {
       suspensionType: json['suspensionType'] as String?,
       accountDeletionRequested:
           json['accountDeletionRequested'] as bool? ?? false,
+      payoutFrozen: json['payoutFrozen'] == true,
+      payoutFreezeReason: json['payoutFreezeReason'] as String?,
     );
   }
 
@@ -172,6 +182,8 @@ class UserModel {
       accountStatus: accountStatus ?? this.accountStatus,
       accountDeletionRequested:
           accountDeletionRequested ?? this.accountDeletionRequested,
+      payoutFrozen: payoutFrozen,
+      payoutFreezeReason: payoutFreezeReason,
     );
   }
 }

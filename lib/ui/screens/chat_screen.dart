@@ -14,6 +14,7 @@ import '../../providers/auth_provider.dart';
 import '../../providers/chat_provider.dart';
 import '../../providers/escrow_provider.dart';
 import '../components/ht_components.dart';
+import '../../core/services/conversation_logic.dart';
 import '../../core/services/artisan_work_logic.dart';
 import '../artisan/components/pro_components.dart';
 import '../components/ht_format.dart';
@@ -40,9 +41,27 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   final _text = TextEditingController();
   final _scroll = ScrollController();
   bool _sending = false;
+  late final AppLifecycleListener _lifecycle;
+
+  /// The conversation currently on screen, for read-marking on resume.
+  ({String jobId, String other})? _open;
+
+  @override
+  void initState() {
+    super.initState();
+    // Stage 8.2: messages that arrived while the app was in the background
+    // are marked read when the user returns to this conversation.
+    _lifecycle = AppLifecycleListener(onResume: () {
+      final o = _open;
+      final uid = _uid;
+      if (o == null || uid.isEmpty || o.other.isEmpty) return;
+      ref.read(chatServiceProvider).markAllAsRead(o.jobId, viewerId: uid, otherPartyId: o.other).catchError((Object _) {});
+    });
+  }
 
   @override
   void dispose() {
+    _lifecycle.dispose();
     _text.dispose();
     _scroll.dispose();
     super.dispose();
@@ -191,11 +210,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               if (job == null) return const Column(children: [HtScreenHeader(title: 'Chat'), HtEmptyView(icon: Icons.search_off_rounded, title: 'Job not found')]);
               final other = _otherId(job);
               if (other.isEmpty) {
-                return const Column(children: [
-                  HtScreenHeader(title: 'Chat'),
-                  HtEmptyView(icon: Icons.forum_outlined, title: 'Chat not available yet', message: 'Chat opens once an artisan is selected for this job.'),
+                // A customer's open job can have several artisan
+                // conversations; without a counterpart we can't pick one.
+                return Column(children: [
+                  const HtScreenHeader(title: 'Chat'),
+                  HtEmptyView(
+                    icon: Icons.forum_outlined,
+                    title: 'Choose a conversation',
+                    message: 'This job has no booked artisan yet. Open your messages to pick the artisan you’re talking to.',
+                    action: HtSmallPrimaryButton(label: 'Open messages', onPressed: () => context.go('/my-chats')),
+                  ),
                 ]);
               }
+              _open = (jobId: job.id, other: other);
               return _ChatBody(
                 job: job,
                 viewerId: _uid,
@@ -251,9 +278,18 @@ class _ChatBody extends ConsumerWidget {
     final messagesAsync = ref.watch(messagesStreamProvider(key));
 
     ref.listen(messagesStreamProvider(key), (_, next) {
+      // Stage 8.2: read receipts are written only for THIS conversation and
+      // only while the app is in the foreground (a chat left open behind
+      // the lock screen must not report messages as read).
       final list = next.asData?.value ?? const <MessageModel>[];
-      if (list.any((m) => m.receiverId == viewerId && !m.isRead)) {
-        ref.read(chatServiceProvider).markAllAsRead(job.id, viewerId: viewerId).catchError((Object _) {});
+      final state = WidgetsBinding.instance.lifecycleState;
+      if (ReadReceipts.shouldMarkRead(
+        appInForeground: state == null || state == AppLifecycleState.resumed,
+        viewerId: viewerId,
+        otherPartyId: otherId,
+        messages: list,
+      )) {
+        ref.read(chatServiceProvider).markAllAsRead(job.id, viewerId: viewerId, otherPartyId: otherId).catchError((Object _) {});
       }
     });
 
@@ -500,7 +536,7 @@ class _Bubble extends StatelessWidget {
         Text(HtFormat.clock(message.createdAt), style: HtType.small(mine ? fg.withValues(alpha: 0.85) : p.textMuted).copyWith(fontSize: 10.5)),
         if (mine) ...[
           const SizedBox(width: 4),
-          Icon(message.isRead ? Icons.done_all_rounded : Icons.done_rounded, size: 14, color: fg.withValues(alpha: message.isRead ? 1 : 0.7)),
+          _ReceiptIcon(state: ReadReceipts.of(message), color: fg),
         ],
       ],
     );
@@ -647,6 +683,28 @@ class _ArtisanWorkStrip extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Sender-side read receipt: a clock while the write is pending, one tick
+/// once the server has the message, two ticks once the recipient opened
+/// the conversation. There is no "delivered" state: nothing in the data
+/// model records delivery (see design/STAGE8_2_NOTIFICATION_AUDIT.md).
+class _ReceiptIcon extends StatelessWidget {
+  const _ReceiptIcon({required this.state, required this.color});
+  final ReceiptState state;
+  final Color color;
+  @override
+  Widget build(BuildContext context) {
+    final (icon, alpha) = switch (state) {
+      ReceiptState.sending => (Icons.schedule_rounded, 0.7),
+      ReceiptState.sent => (Icons.done_rounded, 0.75),
+      ReceiptState.read => (Icons.done_all_rounded, 1.0),
+    };
+    return Semantics(
+      label: ReadReceipts.label(state),
+      child: Tooltip(message: ReadReceipts.label(state), child: Icon(icon, size: 14, color: color.withValues(alpha: alpha))),
     );
   }
 }
