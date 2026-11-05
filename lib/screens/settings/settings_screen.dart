@@ -834,9 +834,9 @@ class _TextEditDialogState extends State<_TextEditDialog> {
                   setState(() => _saving = true);
                   try {
                     await widget.onSave(_ctrl.text.trim());
-                    if (mounted) Navigator.of(context).pop();
+                    if (context.mounted) Navigator.of(context).pop();
                   } catch (e) {
-                    if (mounted) {
+                    if (context.mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
                         SnackBar(content: Text('Error: $e')),
                       );
@@ -929,13 +929,13 @@ class _ChangeEmailDialogState extends ConsumerState<_ChangeEmailDialog> {
                           currentPassword: _passwordCtrl.text,
                           newEmail: _emailCtrl.text.trim(),
                         );
-                    if (mounted) {
+                    if (context.mounted) {
                       Navigator.of(context).pop();
                       showSuccessSnackbar(
                           context, 'Verification sent to ${_emailCtrl.text.trim()}');
                     }
                   } catch (e) {
-                    if (mounted) showErrorSnackbar(context, 'Failed: $e');
+                    if (context.mounted) showErrorSnackbar(context, 'Failed: $e');
                   } finally {
                     if (mounted) setState(() => _saving = false);
                   }
@@ -1050,12 +1050,12 @@ class _ChangePasswordDialogState
                           currentPassword: _currentCtrl.text,
                           newPassword: _newCtrl.text,
                         );
-                    if (mounted) {
+                    if (context.mounted) {
                       Navigator.of(context).pop();
                       showSuccessSnackbar(context, 'Password updated!');
                     }
                   } catch (e) {
-                    if (mounted) showErrorSnackbar(context, 'Failed: $e');
+                    if (context.mounted) showErrorSnackbar(context, 'Failed: $e');
                   } finally {
                     if (mounted) setState(() => _saving = false);
                   }
@@ -1110,7 +1110,7 @@ class _AboutHandyTrustSection extends StatelessWidget {
       title: 'Verification process',
       body:
           'Artisans must submit a government-issued ID and a selfie for identity '
-          'verification. Our team reviews submissions within 24–48 hours. '
+          'verification. You are notified when the review is complete. '
           'Verified artisans display a badge and can unlock higher trust tiers '
           'as they accumulate successful jobs.',
     ),
@@ -1150,7 +1150,7 @@ class _AboutHandyTrustSection extends StatelessWidget {
           'Q: What happens if I\'m unhappy with the work?\n'
           'A: Raise a dispute before releasing payment — our team will mediate.\n\n'
           'Q: How long does escrow hold the payment?\n'
-          'A: Until you mark the job complete or 7 days after job submission.',
+          'A: Until you confirm the work, or until the 14-day review period after the artisan submits it ends.',
     ),
   ];
 

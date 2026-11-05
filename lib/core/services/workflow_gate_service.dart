@@ -190,7 +190,7 @@ abstract final class WorkflowGateService {
           phase: viewerIsCustomer ? 'Work Submitted' : 'Submitted',
           description: viewerIsCustomer
               ? 'The artisan says the job is done. Review their photos and confirm to release payment — or raise a dispute if something is wrong.'
-              : "Waiting for the customer to confirm your work. If they don't respond, payment releases automatically after 48 hours.",
+              : "Waiting for the customer to confirm your work. If they don't respond, payment releases automatically when the 14-day review period ends.",
           waitingOn: viewerIsCustomer ? null : WorkflowActor.customer,
           // Customer has two real actions here (confirm or dispute) — a
           // single primaryAction can't express both, so job_detail_screen

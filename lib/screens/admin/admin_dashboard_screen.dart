@@ -4465,7 +4465,7 @@ class _BetaTesterSwitchTileState extends State<_BetaTesterSwitchTile> {
 
 /// Read-only "can this artisan actually quote right now" indicator, driven
 /// by the same ArtisanEligibility.canQuote the real quote-eligibility gate
-/// in open_jobs_feed_screen.dart/quote_service.dart uses — lets an admin
+/// in the artisan Find Work screen/quote_service.dart uses — lets an admin
 /// instantly see the *effect* of approval/verification/betaTester together,
 /// not just each field in isolation.
 class _EligibleToQuoteRow extends StatelessWidget {

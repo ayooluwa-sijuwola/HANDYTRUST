@@ -10,6 +10,8 @@ dependencies:
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.5
+  # Injectable clock for the artisan countdowns (already resolved via the SDK).
+  clock: ^1.1.2
 
   # State management
   flutter_riverpod: ^2.4.0
@@ -86,7 +88,34 @@ flutter:
     - assets/
     - assets/images/
     - assets/icons/
+    - assets/images/stitch/
   fonts:
     - family: Inter
       fonts:
-        - asset: assets/fonts/Inter/Inter-VariableFont_opsz,wght.ttf  
+        - asset: assets/fonts/Inter/Inter-VariableFont_opsz,wght.ttf
+    # Stage 8 (Stitch) design system. Plus Jakarta Sans (OFL, see
+    # assets/fonts/PlusJakartaSans/OFL.txt) for headings; static Inter for body.
+    - family: HtDisplay
+      fonts:
+        - asset: assets/fonts/PlusJakartaSans/PlusJakartaSans-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/PlusJakartaSans/PlusJakartaSans-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/PlusJakartaSans/PlusJakartaSans-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/PlusJakartaSans/PlusJakartaSans-Bold.ttf
+          weight: 700
+        - asset: assets/fonts/PlusJakartaSans/PlusJakartaSans-ExtraBold.ttf
+          weight: 800
+    - family: HtText
+      fonts:
+        - asset: assets/fonts/Inter/static/Inter_18pt-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/Inter/static/Inter_18pt-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/Inter/static/Inter_18pt-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/Inter/static/Inter_18pt-Bold.ttf
+          weight: 700
+        - asset: assets/fonts/Inter/static/Inter_18pt-ExtraBold.ttf
+          weight: 800

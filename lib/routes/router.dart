@@ -3,48 +3,54 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../providers/auth_provider.dart';
+import '../providers/onboarding_provider.dart';
+import '../ui/screens/artisan_profile_screen.dart';
+import '../ui/artisan/artisan_shell.dart';
+import '../ui/artisan/screens/artisan_inbox_screens.dart';
+import '../ui/artisan/screens/artisan_registration_screen.dart';
+import '../ui/artisan/screens/artisan_verification_screen.dart';
+import '../ui/artisan/screens/business_profile_screen.dart';
+import '../ui/artisan/screens/payout_account_screen.dart';
+import '../ui/artisan/screens/portfolio_screen.dart';
+import '../ui/artisan/screens/submit_work_screen.dart';
+import '../ui/artisan/screens/work_order_screen.dart';
+import '../models/job_model.dart';
+import '../providers/escrow_provider.dart';
+import '../ui/components/ht_components.dart';
+import '../ui/screens/bookings_screen.dart';
+import '../ui/screens/chat_screen.dart';
+import '../ui/screens/confirm_pay_screen.dart';
+import '../ui/screens/discovery_screen.dart';
+import '../ui/screens/notifications_screen.dart';
+import '../ui/screens/onboarding_screen.dart';
+import '../ui/screens/payments_screen.dart';
+import '../ui/screens/post_job_screen.dart';
+import '../ui/screens/profile_screen.dart';
+import '../ui/screens/verification_screen.dart';
 import '../screens/auth/login_screen.dart';
 import '../screens/auth/register_screen.dart';
-import '../screens/auth/artisan_registration_screen.dart';
 import '../screens/auth/verify_email_screen.dart';
 import '../screens/auth/splash_screen.dart';
 import '../screens/home/home_screen.dart';
-import '../screens/home/service_request_screen.dart';
 import '../screens/artisan/artisan_list_screen.dart';
-import '../screens/artisan/artisan_profile_screen.dart';
 import '../screens/artisan/secure_booking_screen.dart';
-import '../screens/artisan/browse_artisans_screen.dart';
 import '../screens/artisan/favorites_screen.dart';
-import '../screens/chat/chat_screen.dart';
 import '../screens/chat/my_chats_screen.dart';
-import '../screens/payment/demo_escrow_screen.dart';
-import '../screens/payment/payment_screen.dart';
 import '../screens/payment/payment_webview_screen.dart';
 import '../screens/job/job_detail_screen.dart';
-import '../screens/job/job_completion_screen.dart';
 import '../screens/review/review_screen.dart';
 import '../screens/dispute/dispute_screen.dart';
 import '../screens/auth/forgot_password_screen.dart';
 import '../screens/admin/admin_dashboard_screen.dart'
     show AdminDashboardScreen, AdminShell;
 import '../screens/admin/admin_sidebar.dart' show AdminSection;
-import '../screens/home/all_jobs_screen.dart';
-import '../screens/verification/verification_upload_screen.dart';
-import '../screens/artisan/bank_details_screen.dart';
-import '../screens/artisan/business_profile_screen.dart';
-import '../screens/artisan/open_jobs_feed_screen.dart';
-import '../screens/artisan/portfolio_manager_screen.dart';
-import '../screens/artisan/portfolio_project_screen.dart';
 import '../models/portfolio_project_model.dart';
 import '../widgets/cannot_open_directly_screen.dart';
-import '../screens/notifications/notifications_screen.dart';
 import '../screens/settings/settings_screen.dart';
 import '../screens/support/contact_support_screen.dart';
 import '../screens/support/about_screen.dart';
-import '../screens/wallet/wallet_screen.dart';
 import '../screens/auth/suspended_screen.dart';
 import '../screens/auth/role_selection_screen.dart';
-import '../screens/profile/profile_screen.dart';
 
 class AuthChangeNotifier extends ChangeNotifier {
   AuthChangeNotifier(Ref ref) {
@@ -64,6 +70,11 @@ class AuthChangeNotifier extends ChangeNotifier {
     // stay there until some unrelated navigation re-triggered the guard.
     ref.listen(
       isAdminProvider,
+      (previous, next) => notifyListeners(),
+    );
+    // Stage 8: signed-out first-run users see onboarding once.
+    ref.listen<bool?>(
+      onboardingSeenProvider,
       (previous, next) => notifyListeners(),
     );
   }
@@ -96,7 +107,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       // Strip any anonymous/demo sessions — treat them as signed-out
       final isRealUser = firebaseUser != null && !firebaseUser.isAnonymous;
 
-      const publicPaths = {'/login', '/register', '/register/artisan', '/forgot-password'};
+      const publicPaths = {'/login', '/register', '/register/artisan', '/forgot-password', '/onboarding'};
       final isPublic = publicPaths.any((p) => path == p || path.startsWith('$p/'));
 
       if (!isRealUser) {
@@ -105,7 +116,14 @@ final routerProvider = Provider<GoRouter>((ref) {
         // "definitely signed out" — every non-public path, '/' included,
         // must redirect to /login. (Previously '/' was special-cased to
         // never redirect, which parked signed-out users on splash forever.)
-        if (!isPublic) return '/login';
+        if (!isPublic) {
+          // First launch shows onboarding once. While the local flag is still
+          // loading, the splash route waits (the guard re-runs when it loads);
+          // any other protected path goes straight to sign-in.
+          final seen = ref.read(onboardingSeenProvider);
+          if (seen == null) return path == '/' ? null : '/login';
+          return seen ? '/login' : '/onboarding';
+        }
         return null;
       }
 
@@ -121,6 +139,7 @@ final routerProvider = Provider<GoRouter>((ref) {
           (path == '/login' ||
               path == '/' ||
               path == '/verify-email' ||
+              path == '/onboarding' ||
               path == '/register')) {
         return '/home';
       }
@@ -160,6 +179,13 @@ final routerProvider = Provider<GoRouter>((ref) {
         }
       }
 
+      // Stage 8.1 (D-6): artisan-only screens redirect non-artisans home.
+      // A UI convenience only — firestore.rules and Cloud Functions enforce
+      // every artisan write independently of navigation.
+      if (profile != null && !profile.isArtisan && _artisanOnly(path)) {
+        return '/home';
+      }
+
       // Dual-role users arriving at /home for the first time are sent to the
       // role selection screen so they explicitly choose their mode. Once they
       // pick a role, activeRole is persisted and they go straight to /home on
@@ -179,6 +205,7 @@ final routerProvider = Provider<GoRouter>((ref) {
     },
     routes: [
       GoRoute(path: '/', builder: (context, _) => const SplashScreen()),
+      GoRoute(path: '/onboarding', builder: (context, _) => const OnboardingScreen()),
       GoRoute(path: '/login', builder: (context, _) => const LoginScreen()),
       GoRoute(path: '/register', builder: (context, _) => const RegisterScreen()),
       GoRoute(path: '/register/artisan', builder: (context, _) => const ArtisanRegistrationScreen()),
@@ -189,14 +216,28 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: '/support', builder: (context, _) => const ContactSupportScreen()),
       GoRoute(path: '/about', builder: (context, _) => const AboutScreen()),
       GoRoute(path: '/settings', builder: (context, _) => const SettingsScreen()),
-      GoRoute(path: '/wallet', builder: (context, _) => const WalletScreen()),
+      // Customers: escrow payments summary (Stage 8). Artisans: Earnings tab
+      // of the artisan shell (Stage 8.1).
+      GoRoute(
+        path: '/wallet',
+        builder: (context, _) => const _RoleAware(
+          customer: Scaffold(body: PaymentsScreen()),
+          artisan: ArtisanShell(initialTab: ArtisanTab.earnings),
+        ),
+      ),
 
       GoRoute(path: '/home', builder: (context, _) => const HomeScreen()),
-      GoRoute(path: '/jobs', builder: (context, _) => const AllJobsScreen()),
-      GoRoute(path: '/notifications', builder: (context, _) => const NotificationsScreen()),
+      GoRoute(
+        path: '/jobs',
+        builder: (context, _) => const _RoleAware(
+          customer: Scaffold(body: BookingsScreen()),
+          artisan: ArtisanShell(initialTab: ArtisanTab.myJobs),
+        ),
+      ),
+      GoRoute(path: '/notifications', builder: (context, _) => const _RoleAware(customer: NotificationsScreen(), artisan: ArtisanNotificationsScreen())),
       GoRoute(
         path: '/request',
-        builder: (_, state) => ServiceRequestScreen(
+        builder: (_, state) => PostJobScreen(
           initialCategory: state.uri.queryParameters['category'],
         ),
       ),
@@ -204,7 +245,8 @@ final routerProvider = Provider<GoRouter>((ref) {
       // Artisan browse (public, no job required)
       GoRoute(
         path: '/browse-artisans',
-        builder: (_, _) => const BrowseArtisansScreen(),
+        // Superseded by Discovery (Stage 8); kept as a path for old links.
+        builder: (_, _) => const Scaffold(body: DiscoveryScreen()),
       ),
 
       // Saved artisans (customer favorites)
@@ -255,29 +297,19 @@ final routerProvider = Provider<GoRouter>((ref) {
           return ChatScreen(
             jobId: _paramOrEmpty(state, 'jobId'),
             otherUserId: extra['artisanId'] as String? ?? '',
-            otherUserName: extra['artisanName'] as String? ?? 'Artisan',
+            otherUserName: extra['artisanName'] as String?,
           );
         },
       ),
       GoRoute(
         path: '/my-chats',
-        builder: (_, _) => const MyChatsScreen(),
+        builder: (_, _) => const _RoleAware(customer: MyChatsScreen(), artisan: ArtisanMessagesScreen()),
       ),
 
       // Payment
       GoRoute(
         path: '/payment/:jobId',
-        builder: (_, state) => PaymentScreen(jobId: _paramOrEmpty(state, 'jobId')),
-      ),
-      GoRoute(
-        path: '/demo-payment/:jobId',
-        builder: (context, state) {
-          final extra = state.extra as Map<String, dynamic>? ?? {};
-          return DemoEscrowScreen(
-            jobId: _paramOrEmpty(state, 'jobId'),
-            autoStart: extra['autoStart'] as bool? ?? false,
-          );
-        },
+        builder: (_, state) => ConfirmPayScreen(jobId: _paramOrEmpty(state, 'jobId')),
       ),
       GoRoute(
         path: '/payment/:jobId/webview',
@@ -294,11 +326,11 @@ final routerProvider = Provider<GoRouter>((ref) {
       // Job lifecycle
       GoRoute(
         path: '/job/:jobId',
-        builder: (_, state) => JobDetailScreen(jobId: _paramOrEmpty(state, 'jobId')),
+        builder: (_, state) => _JobRoute(jobId: _paramOrEmpty(state, 'jobId')),
       ),
       GoRoute(
         path: '/job/:jobId/submit',
-        builder: (_, state) => JobCompletionScreen(jobId: _paramOrEmpty(state, 'jobId')),
+        builder: (_, state) => SubmitWorkScreen(jobId: _paramOrEmpty(state, 'jobId')),
       ),
 
       // Review & dispute
@@ -390,11 +422,11 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: '/verification',
-        builder: (context, _) => const VerificationUploadScreen(),
+        builder: (context, _) => const _RoleAware(customer: VerificationScreen(), artisan: ArtisanVerificationScreen()),
       ),
       GoRoute(
         path: '/bank-details',
-        builder: (context, _) => const BankDetailsScreen(),
+        builder: (context, _) => const PayoutAccountScreen(),
       ),
       GoRoute(
         path: '/business-profile',
@@ -402,7 +434,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: '/portfolio',
-        builder: (context, _) => const PortfolioManagerScreen(),
+        builder: (context, _) => const PortfolioScreen(),
       ),
       GoRoute(
         path: '/portfolio-project',
@@ -414,7 +446,7 @@ final routerProvider = Provider<GoRouter>((ref) {
           // navigation (this route's payload only ever arrives via an
           // in-app context.push(..., extra: {...})), which crashed the app
           // with `type 'Null' is not a subtype of type 'String'`. Both real
-          // call sites (portfolio_manager_screen.dart, create and edit)
+          // call sites (the Portfolio screen's create and edit)
           // always supply artisanId, so this null-safe branch only ever
           // triggers on direct/refreshed navigation, never on the real flow.
           final artisanId = extra['artisanId'] as String?;
@@ -429,18 +461,63 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: '/open-jobs',
-        builder: (context, state) {
-          final extra = state.extra as Map<String, dynamic>? ?? {};
-          return OpenJobsFeedScreen(category: extra['category'] as String? ?? '');
-        },
+        // Find Work tab of the artisan shell (category comes from the
+        // artisan's own profile; customers are redirected by D-6).
+        builder: (context, state) => const ArtisanShell(initialTab: ArtisanTab.findWork),
       ),
       GoRoute(
         path: '/profile',
-        builder: (context, state) => Scaffold(
-          backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-          body: const ProfileTabContent(),
+        builder: (context, state) => const _RoleAware(
+          customer: Scaffold(body: ProfileScreen(standalone: true)),
+          artisan: ArtisanShell(initialTab: ArtisanTab.profile),
         ),
       ),
     ],
   );
 });
+
+/// Stage 8.1 (D-6): artisan-only paths. `/register/artisan` is deliberately
+/// absent — it is how a customer becomes an artisan.
+bool _artisanOnly(String path) =>
+    path == '/open-jobs' ||
+    path == '/bank-details' ||
+    path == '/business-profile' ||
+    path == '/portfolio' ||
+    path == '/portfolio-project' ||
+    (path.startsWith('/job/') && path.endsWith('/submit'));
+
+/// `/job/:jobId`: the job's own artisan gets the artisan work order
+/// (Stage 8.1); everyone else gets the customer job detail.
+class _JobRoute extends ConsumerWidget {
+  const _JobRoute({required this.jobId});
+  final String jobId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final uid = ref.watch(authStateChangesProvider).asData?.value?.uid;
+    final jobAsync = ref.watch(jobStreamProvider(jobId));
+    if (uid == null || jobAsync.isLoading && !jobAsync.hasValue) {
+      return const Scaffold(body: HtLoadingView());
+    }
+    final JobModel? job = jobAsync.asData?.value;
+    if (job != null && job.artisanId.isNotEmpty && job.artisanId == uid) {
+      return WorkOrderScreen(job: job);
+    }
+    return JobDetailScreen(jobId: jobId);
+  }
+}
+
+/// Stage 8: picks the customer or artisan screen for a path shared by both
+/// roles, from the signed-in profile's active role (F-11 rule).
+class _RoleAware extends ConsumerWidget {
+  const _RoleAware({required this.customer, required this.artisan});
+  final Widget customer;
+  final Widget artisan;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final user = ref.watch(currentUserProfileProvider).asData?.value;
+    final artisanMode = user != null && user.isArtisan && user.activeRole == 'artisan';
+    return artisanMode ? artisan : customer;
+  }
+}

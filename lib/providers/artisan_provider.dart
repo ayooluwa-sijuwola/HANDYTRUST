@@ -15,7 +15,7 @@ final artisanProfileProvider =
   );
 });
 
-/// Whether this artisan has completed payout setup (bank_details_screen.dart
+/// Whether this artisan has completed payout setup (the Payout account screen
 /// writes bankName/accountName/accountNumber to artisan_private/{uid} —
 /// owner-only per firestore.rules, hence family-keyed by the artisan's own
 /// uid, not queryable for anyone else). Read-only — no new writes. Exists

@@ -3,7 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:handy_trust/models/portfolio_project_model.dart';
-import 'package:handy_trust/screens/artisan/portfolio_project_screen.dart';
+import 'package:handy_trust/ui/artisan/screens/portfolio_screen.dart';
 import 'package:handy_trust/widgets/cannot_open_directly_screen.dart';
 
 /// Regression test for P0-4 (design/FULL_PRODUCTION_QA_AUDIT.md) /
@@ -83,7 +83,7 @@ void main() {
       final screen = tester.widget<PortfolioProjectScreen>(find.byType(PortfolioProjectScreen));
       expect(screen.artisanId, 'artisan-uid-123');
       expect(screen.existing, isNull);
-      expect(find.text('Add Project'), findsOneWidget);
+      expect(find.text('Add project'), findsOneWidget);
     },
   );
 
@@ -110,7 +110,7 @@ void main() {
       final screen = tester.widget<PortfolioProjectScreen>(find.byType(PortfolioProjectScreen));
       expect(screen.artisanId, 'artisan-uid-123');
       expect(screen.existing?.title, 'Kitchen Renovation');
-      expect(find.text('Edit Project'), findsOneWidget);
+      expect(find.text('Edit project'), findsOneWidget);
       expect(find.text('Kitchen Renovation'), findsOneWidget);
     },
   );

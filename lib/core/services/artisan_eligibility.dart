@@ -4,7 +4,7 @@ import '../../models/artisan_model.dart';
 /// (see design/BETA_TESTING_GUIDE.md). Same relationship as JobService's
 /// canConfirmAgreement/canInitPayment predicates have to their own rules
 /// mirror: this is the one place the client computes these two questions,
-/// used by both the UI (open_jobs_feed_screen.dart, quote_service.dart) and
+/// used by both the UI (artisan Find Work and quote composer, quote_service.dart) and
 /// this file's own tests — not a second, drifting copy of the logic.
 ///
 /// firestore.rules remains the actual security authority regardless of what
