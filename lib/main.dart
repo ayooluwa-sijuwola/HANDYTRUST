@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'core/firebase/firebase_initializer.dart';
 import 'firebase/messaging/local_notification_service.dart';
+import 'providers/auth_provider.dart';
+import 'providers/chat_provider.dart';
 import 'providers/init_provider.dart';
 import 'providers/notification_provider.dart';
 import 'providers/theme_provider.dart';
@@ -35,7 +37,13 @@ void main() async {
     debugPrint('[main] LocalNotificationService.init failed: $e');
   }
 
-  runApp(const ProviderScope(child: HandyTrustApp()));
+  runApp(ProviderScope(
+    overrides: [
+      // Stage 8.2: remove this device's push registration before sign-out.
+      beforeSignOutProvider.overrideWith((ref) => () => unregisterPushDevice(ref)),
+    ],
+    child: const HandyTrustApp(),
+  ));
 }
 
 class HandyTrustApp extends ConsumerWidget {
@@ -94,6 +102,9 @@ class _HandyTrustRouterApp extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final router = ref.watch(routerProvider);
     ref.watch(notificationInitProvider);
+    // Stage 8.2: delivery receipts for messages that reach this device.
+    final signedIn = ref.watch(authStateChangesProvider).asData?.value;
+    if (signedIn != null && !signedIn.isAnonymous) ref.watch(deliveryAckProvider(signedIn.uid));
     final themeMode = ref.watch(themeProvider);
 
     return MaterialApp.router(

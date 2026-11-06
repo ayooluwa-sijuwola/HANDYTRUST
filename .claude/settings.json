@@ -30,7 +30,15 @@
       "Bash(dart format *)",
       "Bash(ls assets/images)",
       "Bash(ls assets *)",
-      "Bash(find . -maxdepth 2 -iname \"*screenshot*\")"
+      "Bash(find . -maxdepth 2 -iname \"*screenshot*\")",
+      "Bash(firebase deploy *)",
+      "Bash(python3 -c \"import json; json.load\\(open\\('firestore.indexes.json'\\)\\); print\\('VALID_JSON'\\)\")",
+      "Bash(node -e \"JSON.parse\\(require\\('fs'\\).readFileSync\\('firestore.indexes.json','utf8'\\)\\); console.log\\('VALID_JSON'\\)\")",
+      "Skill(run)",
+      "Skill(run:*)",
+      "Bash(flutter pub *)",
+      "Bash(python3 -c ' *)",
+      "Bash(cp pubspec.lock pubspec.lock.bak)"
     ],
     "additionalDirectories": [
       "c:\\Users\\gbola\\.claude\\projects\\c--Users-gbola-OneDrive-Pictures-flutter-handy-trust\\memory"

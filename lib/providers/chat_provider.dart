@@ -261,3 +261,40 @@ class ChatNotifierParams {
   @override
   int get hashCode => Object.hash(jobId, senderId, receiverId, senderRole);
 }
+
+/// Stage 8.2: incoming unread messages in one conversation, with whether
+/// the snapshot is server-confirmed (F-3). autoDispose (F-4): the Firestore
+/// listener ends as soon as nothing watches it, e.g. after sign-out.
+final incomingUnreadProvider = StreamProvider.autoDispose.family<IncomingSnapshot, ChatThreadKey>(
+  (ref, k) => ref.watch(chatServiceProvider).watchIncomingForAck(k.jobId, viewerId: k.viewerId, otherPartyId: k.otherPartyId),
+);
+
+/// Stage 8.2 delivery receipts. Watched at the app root while signed in:
+/// for every conversation on BOTH sides of the account, messages that
+/// reached this device from the server get `deliveredAt` stamped once.
+/// Only the recipient's own app can do this (firestore.rules), so
+/// "Delivered" means the recipient's device really has the message.
+/// - F-3: cache-only snapshots never produce a receipt.
+/// - F-4: autoDispose, so when the root stops watching (sign-out) every
+///   per-conversation listener of that account is cancelled instead of
+///   running on under the next account.
+final deliveryAckProvider = Provider.autoDispose.family<void, String>((ref, uid) {
+  final refs = [
+    ...?ref.watch(customerConversationsProvider(uid)).asData?.value,
+    ...?ref.watch(artisanConversationsProvider(uid)).asData?.value,
+  ];
+  final service = ref.watch(chatServiceProvider);
+  for (final c in refs) {
+    final key = ChatThreadKey(jobId: c.job.id, viewerId: c.viewerId, otherPartyId: c.otherPartyId);
+    ref.listen<AsyncValue<IncomingSnapshot>>(incomingUnreadProvider(key), (_, next) {
+      final snap = next.asData?.value;
+      if (snap == null) return;
+      final todo = DeliveryReceipts.toAcknowledge(snap.messages, viewerId: uid, fromCache: snap.fromCache);
+      if (todo.isEmpty) return;
+      service.markDelivered(c.job.id, todo.map((m) => m.id)).catchError((Object e) {
+        debugPrint('[chat_provider] markDelivered failed for ${c.job.id}: $e');
+        return 0;
+      });
+    }, fireImmediately: true);
+  }
+});

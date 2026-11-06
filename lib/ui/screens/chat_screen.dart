@@ -688,9 +688,8 @@ class _ArtisanWorkStrip extends StatelessWidget {
 }
 
 /// Sender-side read receipt: a clock while the write is pending, one tick
-/// once the server has the message, two ticks once the recipient opened
-/// the conversation. There is no "delivered" state: nothing in the data
-/// model records delivery (see design/STAGE8_2_NOTIFICATION_AUDIT.md).
+/// once the server has the message, two faint ticks once the recipient's
+/// device has it, two solid ticks once they opened the conversation.
 class _ReceiptIcon extends StatelessWidget {
   const _ReceiptIcon({required this.state, required this.color});
   final ReceiptState state;
@@ -700,6 +699,7 @@ class _ReceiptIcon extends StatelessWidget {
     final (icon, alpha) = switch (state) {
       ReceiptState.sending => (Icons.schedule_rounded, 0.7),
       ReceiptState.sent => (Icons.done_rounded, 0.75),
+      ReceiptState.delivered => (Icons.done_all_rounded, 0.6),
       ReceiptState.read => (Icons.done_all_rounded, 1.0),
     };
     return Semantics(

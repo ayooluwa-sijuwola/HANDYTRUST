@@ -36,10 +36,10 @@ class LocalNotificationService {
     importance: Importance.high,
   );
 
-  static bool _alwaysEnabled() => true;
+  static bool _alwaysShow(String? targetUid) => true;
 
   bool _foregroundListenerRegistered = false;
-  bool Function() _isEnabled = _alwaysEnabled;
+  bool Function(String? targetUid) _shouldShow = _alwaysShow;
 
   /// Called when the user taps a notification this service displayed
   /// (foreground messages). Set by the push provider; until then a tap is
@@ -135,12 +135,16 @@ class LocalNotificationService {
   }
 
   /// Invalidates this device's FCM token (sign-out, or push turned off).
-  /// A later [getToken] returns a fresh token.
-  Future<void> deleteToken() async {
+  /// A later [getToken] returns a fresh token. Returns false if the token
+  /// could not be invalidated (e.g. offline), so the caller can retry
+  /// (Stage 8.2 F-6).
+  Future<bool> deleteToken() async {
     try {
       await _fcm.deleteToken();
+      return true;
     } catch (e) {
       debugPrint('[FCM] deleteToken failed: $e');
+      return false;
     }
   }
 
@@ -149,10 +153,11 @@ class LocalNotificationService {
 
   /// Start listening for foreground FCM messages and show local notifications.
   /// Safe to call multiple times — only registers the listener once.
-  /// [isEnabled] is re-checked on every message so a live preference change
-  /// takes effect without re-registering the listener.
-  void startForegroundListener({bool Function() isEnabled = _alwaysEnabled}) {
-    _isEnabled = isEnabled;
+  /// [shouldShow] is re-checked on every message (with the recipient uid the
+  /// server put in the payload) so a live preference or account change takes
+  /// effect without re-registering the listener.
+  void startForegroundListener({bool Function(String? targetUid) shouldShow = _alwaysShow}) {
+    _shouldShow = shouldShow;
     if (kIsWeb) {
       debugPrint('[LocalNotif] startForegroundListener skipped on web');
       return;
@@ -160,7 +165,7 @@ class LocalNotificationService {
     if (_foregroundListenerRegistered) return;
     _foregroundListenerRegistered = true;
     FirebaseMessaging.onMessage.listen((RemoteMessage message) {
-      if (!_isEnabled()) return;
+      if (!_shouldShow(message.data['uid'] as String?)) return;
       final notification = message.notification;
       if (notification == null) return;
       _show(
@@ -208,5 +213,6 @@ String destinationFromMessage(RemoteMessage message) {
     type: data['type'] as String?,
     jobId: data['jobId'] as String?,
     route: data['route'] as String?,
+    chatWith: data['chatWith'] as String?,
   );
 }

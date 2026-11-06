@@ -16,6 +16,25 @@ service cloud.firestore {
         exists(/databases/$(database)/documents/admins/$(request.auth.uid));
     }
 
+    // Stage 8.2: message receipt transitions (see messages update rule).
+    function _receiptFieldChanged(f) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasAny([f]);
+    }
+    function _validReceiptChange() {
+      return (
+        // read: only false -> true, and only together with the flag itself
+        (!_receiptFieldChanged('isRead') ||
+          (resource.data.get('isRead', false) == false && request.resource.data.isRead == true)) &&
+        (!_receiptFieldChanged('readAt') ||
+          (_receiptFieldChanged('isRead') && request.resource.data.readAt == request.time)) &&
+        // delivered: set once, to the server time
+        (!_receiptFieldChanged('deliveredAt') ||
+          (!('deliveredAt' in resource.data) && request.resource.data.deliveredAt == request.time)) &&
+        // at least one receipt actually changes (no empty "success" writes)
+        request.resource.data.diff(resource.data).affectedKeys().size() > 0
+      );
+    }
+
     function getJob(jobId) {
       return get(/databases/$(database)/documents/jobs/$(jobId)).data;
     }
@@ -516,11 +535,21 @@ service cloud.firestore {
         // someone else's read-state/unread badge. Matches the same
         // sender/receiver scoping the read/create rules on this same
         // subcollection already use.
+        // Stage 8.2 (approved): read receipts are written ONLY by the
+        // message's recipient (the sender can no longer fake or reset them).
+        //  - Read: isRead false -> true, once; optional readAt must be the
+        //    server time. Older app versions send {isRead: true} only, which
+        //    stays valid.
+        //  - Delivered: deliveredAt set once, to the server time, when the
+        //    recipient's device has the message (may accompany the read).
+        // Nothing else on a message can change.
         allow update: if isSignedIn() &&
-          (resource.data.senderId == request.auth.uid ||
-           resource.data.receiverId == request.auth.uid) &&
+          resource.data.receiverId == request.auth.uid &&
+          request.resource.data.senderId == resource.data.senderId &&
+          request.resource.data.receiverId == resource.data.receiverId &&
           request.resource.data.diff(resource.data).affectedKeys()
-            .hasOnly(['isRead']);
+            .hasOnly(['isRead', 'readAt', 'deliveredAt']) &&
+          _validReceiptChange();
         // Admin-only — used when an admin deletes a spam/fake job and
         // cleans up its chat thread. No non-admin may ever delete a message.
         allow delete: if isAdmin();
@@ -945,6 +974,26 @@ service cloud.firestore {
     match /fcm_tokens/{uid} {
       allow read:  if false;
       allow write: if isOwner(uid);
+
+      // Stage 8.2 (approved): one document per installed device, so devices
+      // no longer overwrite each other. Only the account owner may register
+      // or remove its devices; only token/platform/updatedAt are stored.
+      // Server code (Admin SDK) reads tokens and removes invalid ones.
+      match /devices/{deviceId} {
+        allow read: if false;
+        allow create, update: if isOwner(uid) &&
+          request.resource.data.keys().hasOnly(['token', 'platform', 'updatedAt']) &&
+          request.resource.data.token is string &&
+          request.resource.data.token.size() >= 10 &&
+          request.resource.data.token.size() <= 4096 &&
+          request.resource.data.platform in ['android', 'ios', 'web'] &&
+          request.resource.data.updatedAt == request.time &&
+          // F-8: the app's per-install id is a lowercase UUID v4. The server
+          // also sends to at most 10 registrations per account and prunes
+          // older ones (functions/index.js MAX_PUSH_DEVICES).
+          deviceId.matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$');
+        allow delete: if isOwner(uid);
+      }
     }
 
     // ─── Admins registry ────────────────────────────────────────────────────
@@ -1142,6 +1191,26 @@ service cloud.firestore {
       allow create: if false; // handled by the per-job subcollection rule
       allow update: if false;
       allow delete: if false;
+    }
+
+    // ─── RumptyCloud staging media (synthetic test media only) ───────────────
+    // functions/media.js is the only writer (Admin SDK). Clients may read the
+    // records they own (admins: all) and nothing else: no client can create,
+    // change (owner, object key, bucket, status, visibility, checksum) or
+    // delete a record, so an upload can never be forged or confirmed, and
+    // clean-up can never be bypassed, from the client.
+    match /media/{mediaId} {
+      allow read: if isSignedIn() && (resource.data.ownerUid == request.auth.uid || isAdmin());
+      allow create, update, delete: if false;
+    }
+    // Per-user upload counters and storage use (read-only for the owner).
+    match /media_quotas/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow create, update, delete: if false;
+    }
+    // Global limits (server only).
+    match /media_system/{docId} {
+      allow read, create, update, delete: if false;
     }
   }
 }

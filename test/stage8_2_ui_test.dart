@@ -152,7 +152,16 @@ class _FakePush implements PushPlatform {
   @override
   Future<String?> getToken() async => 'tok';
   @override
-  Future<void> deleteToken() async => r.add('deleteToken', null);
+  Future<bool> deleteToken() async {
+    r.add('deleteToken', null);
+    return true;
+  }
+
+  bool pending = false;
+  @override
+  Future<bool> invalidationPending() async => pending;
+  @override
+  Future<void> setInvalidationPending(bool p) async => pending = p;
   @override
   Stream<String> get onTokenRefresh => refresh.stream;
   @override
@@ -173,11 +182,13 @@ class _FakePush implements PushPlatform {
   @override
   set onLocalTap(void Function(String? payload)? handler) => localTap = handler;
   @override
-  void startForegroundListener(bool Function() enabled) => r.add('foreground', null);
+  void startForegroundListener(bool Function(String? targetUid) shouldShow) => r.add('foreground', null);
   @override
-  Future<void> saveToken(String uid, String token) async => r.add('saveToken', [uid, token]);
+  Future<String> deviceId() async => 'dev-1';
   @override
-  Future<void> removeToken(String uid) async => r.add('removeToken', uid);
+  Future<void> saveToken(String uid, String deviceId, String token) async => r.add('saveToken', [uid, deviceId, token]);
+  @override
+  Future<void> removeDevice(String uid, String deviceId) async => r.add('removeDevice', [uid, deviceId]);
 }
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -568,7 +579,7 @@ void main() {
       profile.add(_user(uid: 'u1'));
       await _settle(t, 4);
       expect(push.r.count('requestPermission'), 1);
-      expect(push.r.calls['saveToken']!.single, ['u1', 'tok']);
+      expect(push.r.calls['saveToken']!.single, ['u1', 'dev-1', 'tok']);
     });
 
     testWidgets('push turned off: device token invalidated and stored token removed', (t) async {
@@ -577,7 +588,7 @@ void main() {
       profile.add(_user(uid: 'u1', notifications: false));
       await _settle(t, 4);
       expect(push.r.count('deleteToken'), 1);
-      expect(push.r.calls['removeToken']!.single, 'u1');
+      expect(push.r.calls['removeDevice']!.single, ['u1', 'dev-1']);
       expect(push.r.count('saveToken'), 0);
     });
 

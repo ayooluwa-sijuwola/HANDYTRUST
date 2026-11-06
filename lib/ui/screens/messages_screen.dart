@@ -162,6 +162,7 @@ class _ConversationTile extends ConsumerWidget {
                     Icon(switch (ReadReceipts.of(last)) {
                       ReceiptState.sending => Icons.schedule_rounded,
                       ReceiptState.sent => Icons.done_rounded,
+                      ReceiptState.delivered => Icons.done_all_rounded,
                       ReceiptState.read => Icons.done_all_rounded,
                     }, size: 14, color: last.isRead ? p.accentStrong : p.textMuted),
                     const SizedBox(width: 4),

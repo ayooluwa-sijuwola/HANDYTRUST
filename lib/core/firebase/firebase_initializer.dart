@@ -3,12 +3,21 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:handy_trust/firebase_options.dart';
 
+import 'emulator_config.dart';
+
 Future<void> initializeFirebase() async {
   // main() already calls this before runApp(); firebaseInitializationProvider
   // calls it again inside the widget tree. Guard against re-initializing,
   // which would otherwise throw [core/duplicate-app] on the second call.
   if (Firebase.apps.isNotEmpty) {
     debugPrint('[firebase_initializer] Firebase already initialized — skipping');
+    return;
+  }
+
+  // Local emulator mode (opt-in, never in release builds): demo project +
+  // local emulators only. See emulator_config.dart.
+  if (EmulatorConfig.requested) {
+    await EmulatorConfig.initialize();
     return;
   }
 

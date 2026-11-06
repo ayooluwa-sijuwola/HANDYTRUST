@@ -13,6 +13,11 @@ class NotificationModel {
   /// Stage 6: server-set deep link (e.g. /job/{id}); see safeNotificationRoute.
   final String? route;
 
+  /// Stage 8.2 (F-1): for `message_received`, the other participant of the
+  /// conversation (the chat route is built from it; `route` stays /job/{id}
+  /// for older app versions).
+  final String? chatWith;
+
   const NotificationModel({
     required this.id,
     required this.userId,
@@ -24,6 +29,7 @@ class NotificationModel {
     this.readAt,
     this.jobId,
     this.route,
+    this.chatWith,
   });
 
   factory NotificationModel.fromJson(Map<String, dynamic> json) {
@@ -49,6 +55,7 @@ class NotificationModel {
       readAt: toDateNullable(json['readAt']),
       jobId: json['jobId'] as String?,
       route: json['route'] as String?,
+      chatWith: json['chatWith'] as String?,
     );
   }
 
@@ -63,5 +70,6 @@ class NotificationModel {
         if (readAt != null) 'readAt': Timestamp.fromDate(readAt!),
         if (jobId != null) 'jobId': jobId,
         if (route != null) 'route': route,
+        if (chatWith != null) 'chatWith': chatWith,
       };
 }

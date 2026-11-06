@@ -18,6 +18,11 @@ class MessageModel {
   /// Never serialised; set by ChatService from snapshot metadata so the UI
   /// can show "Sending" instead of a false "Sent".
   final bool isPending;
+
+  /// Stage 8.2: server time the recipient's device first had the message
+  /// (set once by the recipient's app) and the time it was read.
+  final DateTime? deliveredAt;
+  final DateTime? readAt;
   final DateTime createdAt;
 
   const MessageModel({
@@ -32,6 +37,8 @@ class MessageModel {
     this.isRead = false,
     required this.createdAt,
     this.isPending = false,
+    this.deliveredAt,
+    this.readAt,
   });
 
   factory MessageModel.fromJson(Map<String, dynamic> json) {
@@ -54,6 +61,8 @@ class MessageModel {
         orElse: () => MessageType.text,
       ),
       imageUrl: json['imageUrl'] as String?,
+      deliveredAt: json['deliveredAt'] is Timestamp ? (json['deliveredAt'] as Timestamp).toDate() : null,
+      readAt: json['readAt'] is Timestamp ? (json['readAt'] as Timestamp).toDate() : null,
       proposedAmount: (json['proposedAmount'] as num?)?.toDouble(),
       isRead: json['isRead'] as bool? ?? false,
       createdAt: created,
@@ -74,6 +83,8 @@ class MessageModel {
           isRead: isRead,
           createdAt: createdAt,
           isPending: pending,
+          deliveredAt: deliveredAt,
+          readAt: readAt,
         );
 
   Map<String, dynamic> toJson() => {

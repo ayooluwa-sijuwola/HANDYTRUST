@@ -22,9 +22,15 @@ class AuthState {
 }
 
 class AuthNotifier extends StateNotifier<AuthState> {
-  AuthNotifier(this._authService) : super(const AuthState());
+  AuthNotifier(this._authService, {Future<void> Function()? beforeSignOut})
+      : _beforeSignOut = beforeSignOut,
+        super(const AuthState());
 
   final IAuthService _authService;
+
+  /// Stage 8.2: work that must run while still signed in (removing this
+  /// device's push registration). Never blocks sign-out on failure.
+  final Future<void> Function()? _beforeSignOut;
 
   Future<bool> signUp({
     required String email,
@@ -132,7 +138,19 @@ class AuthNotifier extends StateNotifier<AuthState> {
     }
   }
 
+  /// Upper bound on [_beforeSignOut] (Stage 8.2 F-5): sign-out never waits
+  /// longer than this for push clean-up, even if a platform call hangs.
+  static const beforeSignOutTimeout = Duration(seconds: 8);
+
   Future<void> signOut() async {
+    final hook = _beforeSignOut;
+    if (hook != null) {
+      try {
+        await hook().timeout(beforeSignOutTimeout);
+      } catch (_) {
+        // Sign-out must always proceed (failure or timeout).
+      }
+    }
     await _authService.signOut();
   }
 
@@ -145,8 +163,12 @@ final authServiceProvider = Provider<AuthService>((ref) => AuthService());
 
 final profileServiceProvider = Provider<ProfileService>((ref) => ProfileService());
 
+/// Stage 8.2: runs just before sign-out (overridden at the app root with
+/// the push-device cleanup). No-op by default (tests, other entry points).
+final beforeSignOutProvider = Provider<Future<void> Function()>((ref) => () async {});
+
 final authNotifierProvider = StateNotifierProvider<AuthNotifier, AuthState>(
-  (ref) => AuthNotifier(ref.watch(authServiceProvider)),
+  (ref) => AuthNotifier(ref.watch(authServiceProvider), beforeSignOut: () => ref.read(beforeSignOutProvider)()),
 );
 
 final authStateChangesProvider = StreamProvider<User?>(

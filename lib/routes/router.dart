@@ -50,6 +50,8 @@ import '../widgets/cannot_open_directly_screen.dart';
 import '../ui/screens/messages_screen.dart';
 import '../ui/settings/help_screens.dart';
 import '../ui/settings/settings_screens.dart';
+import '../core/firebase/emulator_config.dart';
+import '../ui/staging/media_staging_screen.dart';
 import '../screens/auth/suspended_screen.dart';
 import '../screens/auth/role_selection_screen.dart';
 
@@ -229,6 +231,9 @@ final routerProvider = Provider<GoRouter>((ref) {
           GoRoute(path: 'security', builder: (context, _) => const SecurityScreen()),
         ],
       ),
+      // RumptyCloud staging media test — registered ONLY in local emulator
+      // mode (never in normal or release builds).
+      if (EmulatorConfig.enabled) GoRoute(path: '/staging/media', builder: (context, _) => const MediaStagingScreen()),
       // Customers: escrow payments summary (Stage 8). Artisans: Earnings tab
       // of the artisan shell (Stage 8.1).
       GoRoute(

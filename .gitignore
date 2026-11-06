@@ -47,6 +47,8 @@ app.*.map.json
 # Stage 7.1: local Functions secrets (emulator/test keys) must never be committed.
 functions/.secret.local
 functions/.env.local
+# RumptyCloud staging: optional local key-ID prefixes for tool/check_no_secrets.js.
+tool/.secret-prefix.local
 
 # Dependencies and local Firebase deploy cache (never commit).
 node_modules/

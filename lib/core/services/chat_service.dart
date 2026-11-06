@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'package:clock/clock.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
 import '../../models/message_model.dart';
+import 'conversation_logic.dart';
 import 'notification_service.dart';
 
 class ChatService {
@@ -231,8 +233,16 @@ class ChatService {
     await _messages(jobId).doc(id).set(msg.toJson());
   }
 
-  Future<void> markAsRead(String jobId, String messageId) =>
-      _messages(jobId).doc(messageId).update({'isRead': true});
+  /// Stage 8.2 F-2: the fields a read receipt writes. Never `deliveredAt`:
+  /// the delivery receipt for the same message is often still in flight, and
+  /// the rules allow `deliveredAt` only once, so including it here could get
+  /// the whole read batch refused. Read already outranks Delivered.
+  static Map<String, Object> readReceiptUpdate() => {'isRead': true, 'readAt': FieldValue.serverTimestamp()};
+
+  /// Firestore caps a write batch at 500 operations (F-10).
+  static const maxBatchWrites = 450;
+
+  Future<void> markAsRead(String jobId, String messageId) => _messages(jobId).doc(messageId).update(readReceiptUpdate());
 
   /// Marks every unread message addressed to [viewerId] in this job's
   /// thread as read — the actual fix for the "unread badge never clears"
@@ -252,29 +262,88 @@ class ChatService {
       if (otherPartyId != null) q = q.where('senderId', isEqualTo: otherPartyId);
       final snap = await q.where('isRead', isEqualTo: false).get();
       if (snap.docs.isEmpty) return;
-      final batch = _db.batch();
-      for (final doc in snap.docs) {
-        batch.update(doc.reference, {'isRead': true});
+      for (final part in chunked(snap.docs, maxBatchWrites)) {
+        final batch = _db.batch();
+        for (final doc in part) {
+          batch.update(doc.reference, readReceiptUpdate());
+        }
+        await batch.commit();
       }
-      await batch.commit();
     } finally {
       _markingRead.remove(key);
     }
   }
 
+  Query<Map<String, dynamic>> _incomingUnread(String jobId, String viewerId, String otherPartyId) => _messages(jobId)
+      .where('receiverId', isEqualTo: viewerId)
+      .where('senderId', isEqualTo: otherPartyId)
+      .where('isRead', isEqualTo: false);
+
+  /// Unread messages from [otherPartyId] to [viewerId] (one conversation),
+  /// with pending-write metadata. Drives unread counts.
+  Stream<List<MessageModel>> watchIncomingUnread(String jobId, {required String viewerId, required String otherPartyId}) =>
+      _incomingUnread(jobId, viewerId, otherPartyId).snapshots().map((s) => s.docs.map(_fromDoc).toList());
+
+  /// Same messages for delivery receipts (F-3): metadata changes included,
+  /// so the caller sees when a snapshot stops being cache-only and becomes
+  /// server-confirmed.
+  Stream<IncomingSnapshot> watchIncomingForAck(String jobId, {required String viewerId, required String otherPartyId}) =>
+      _incomingUnread(jobId, viewerId, otherPartyId)
+          .snapshots(includeMetadataChanges: true)
+          .map((s) => IncomingSnapshot(s.docs.map(_fromDoc).toList(), fromCache: s.metadata.isFromCache));
+
+  final Set<String> _acking = {};
+  final ReceiptBackoff _ackBackoff = ReceiptBackoff();
+
+  /// Stage 8.2: records that this device (the recipient's) has received the
+  /// given messages from the server. Firestore rules allow only the
+  /// recipient to set `deliveredAt`, once, to the server time.
+  /// F-10: batches of at most [maxBatchWrites]; a refused batch is retried
+  /// only after a back-off (60 s, doubling to 30 min). Returns how many
+  /// receipts the server accepted.
+  Future<int> markDelivered(String jobId, Iterable<String> messageIds) async {
+    final now = clock.now();
+    final ids = messageIds.where((id) => _ackBackoff.ready('$jobId/$id', now) && _acking.add('$jobId/$id')).toList();
+    if (ids.isEmpty) return 0;
+    var accepted = 0;
+    try {
+      for (final part in chunked(ids, maxBatchWrites)) {
+        final batch = _db.batch();
+        for (final id in part) {
+          batch.update(_messages(jobId).doc(id), {'deliveredAt': FieldValue.serverTimestamp()});
+        }
+        try {
+          await batch.commit();
+          for (final id in part) {
+            _ackBackoff.succeeded('$jobId/$id');
+          }
+          accepted += part.length;
+        } catch (e) {
+          final at = clock.now();
+          for (final id in part) {
+            _ackBackoff.failed('$jobId/$id', at);
+          }
+          debugPrint('[ChatService] delivery receipts refused for job $jobId (${part.length}): $e');
+        }
+      }
+    } finally {
+      for (final id in ids) {
+        _acking.remove('$jobId/$id');
+      }
+    }
+    return accepted;
+  }
+
   /// Live unread count in ONE conversation (messages from [otherPartyId]
   /// to [viewerId] not yet read). Per-job, rules-safe query: the
   /// collection-group alternative is denied by firestore.rules.
-  Stream<int> watchPairUnreadCount(String jobId, {required String viewerId, required String otherPartyId}) => _messages(jobId)
-      .where('receiverId', isEqualTo: viewerId)
-      .where('senderId', isEqualTo: otherPartyId)
-      .where('isRead', isEqualTo: false)
-      .snapshots()
-      .map((s) => s.docs.length)
-      .transform(StreamTransformer<int, int>.fromHandlers(handleError: (Object e, StackTrace st, sink) {
-        debugPrint('[ChatService] watchPairUnreadCount error for job $jobId: $e');
-        sink.addError(e, st);
-      }));
+  Stream<int> watchPairUnreadCount(String jobId, {required String viewerId, required String otherPartyId}) =>
+      watchIncomingUnread(jobId, viewerId: viewerId, otherPartyId: otherPartyId).map((l) => l.length).transform(
+            StreamTransformer<int, int>.fromHandlers(handleError: (Object e, StackTrace st, sink) {
+              debugPrint('[ChatService] watchPairUnreadCount error for job $jobId: $e');
+              sink.addError(e, st);
+            }),
+          );
 
   /// Everyone [viewerId] has exchanged messages with on a job, for jobs the
   /// viewer may query by sender/receiver (job parties, and pre-booking

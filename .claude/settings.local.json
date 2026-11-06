@@ -4,7 +4,16 @@
       "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\gbola\\\\OneDrive\\\\Pictures\\\\flutter\\\\handy_trust\" -Recurse -Force)",
       "Bash(Select-Object FullName)",
       "Bash(Sort-Object FullName)",
-      "Bash(flutter pub *)"
+      "Bash(flutter pub *)",
+      "Bash(git status *)",
+      "Bash(flutter analyze *)",
+      "Bash(flutter devices *)",
+      "Bash(dart --version)",
+      "WebFetch(domain:stitch.withgoogle.com)",
+      "Read(//c/Users/gbola/.claude/skills/playwright/**)",
+      "Bash(node run.js \"C:\\\\Users\\\\gbola\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--PROJECTS-handy-trust\\\\0aaa8325-4284-47ff-a759-5887f4a76cd0\\\\scratchpad\\\\qa3-artisanprofile.js\")",
+      "Bash(node run.js \"C:\\\\Users\\\\gbola\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--PROJECTS-handy-trust\\\\0aaa8325-4284-47ff-a759-5887f4a76cd0\\\\scratchpad\\\\qa3-artisanprofile2.js\")",
+      "Bash(node run.js ' *)"
     ]
   }
 }

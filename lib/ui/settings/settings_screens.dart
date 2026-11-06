@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/firebase/emulator_config.dart';
 import '../../core/services/auth_service.dart';
 import '../../core/validation/password_policy.dart';
 import '../../models/user_model.dart';
@@ -204,6 +205,11 @@ class SettingsScreen extends ConsumerWidget {
               onTap: () => _switchMode(context, ref, user),
             ),
         ]),
+        // RumptyCloud staging media test: emulator mode only.
+        if (EmulatorConfig.enabled)
+          SettingsGroup(label: 'Staging (emulator only)', children: [
+            HtMenuRow(icon: Icons.cloud_upload_outlined, title: 'Media storage test', subtitle: 'Synthetic images · RumptyCloud staging', onTap: () => context.push('/staging/media')),
+          ]),
         SettingsGroup(label: 'Help', children: [
           HtMenuRow(icon: Icons.support_agent_rounded, title: 'Support Centre', subtitle: 'Help topics and contact support', onTap: () => context.push('/support')),
           HtMenuRow(icon: Icons.info_outline_rounded, title: 'About HandyTrust', onTap: () => context.push('/about')),

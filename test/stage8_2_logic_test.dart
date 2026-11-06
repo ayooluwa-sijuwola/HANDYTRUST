@@ -81,12 +81,12 @@ void main() {
     });
   });
 
-  group('Read receipts (no delivered state, no false success)', () {
+  group('Read receipts (no false success; delivered covered in stage8_2_backend_client_test)', () {
     test('pending write → Sending; acknowledged → Sent; read flag → Read', () {
       expect(ReadReceipts.of(msg('c1', 'a1', pending: true)), ReceiptState.sending);
       expect(ReadReceipts.of(msg('c1', 'a1')), ReceiptState.sent);
       expect(ReadReceipts.of(msg('c1', 'a1', read: true)), ReceiptState.read);
-      expect(ReceiptState.values.map(ReadReceipts.label), ['Sending', 'Sent', 'Read']);
+      expect(ReceiptState.values.map(ReadReceipts.label), ['Sending', 'Sent', 'Delivered', 'Read']);
     });
 
     test('marks read only in the foreground, only this conversation, only real unread', () {

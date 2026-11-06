@@ -981,6 +981,9 @@ async function _sendInAppNotification(userId, type, title, body, jobId, opts = {
     jobId: jobId || null,
     route: opts.route || (jobId ? `/job/${jobId}` : '/notifications'),
   };
+  // Stage 8.2 (F-1): the exact conversation is carried in its own field so
+  // `route` keeps the value every installed app version understands.
+  if (opts.chatWith) doc.chatWith = String(opts.chatWith);
   if (opts.dedupeKey) {
     try {
       await ref.create(doc);
@@ -1007,30 +1010,280 @@ exports.onNotificationCreated = onDocumentCreated(
   'notifications/{notifId}',
   async (event) => {
     const notif = event.data.data();
-    if (!notif?.userId) return;
-
     try {
-      const tokenDoc = await db.collection('fcm_tokens').doc(notif.userId).get();
-      const token = tokenDoc.data()?.token;
-      if (!token) return; // no push registered for this user — in-app entry still exists
-
-      await messaging.send({
-        token,
-        notification: { title: notif.title, body: notif.body },
-        data: {
-          type: notif.type || '',
-          jobId: notif.jobId || '',
-          // Stage 6 (HT-026): the app navigates to this on tap.
-          route: notif.route || (notif.jobId ? `/job/${notif.jobId}` : '/notifications'),
-        },
-        android: { priority: 'high' },
-        apns: { payload: { aps: { sound: 'default' } } },
-      });
+      await _deliverPush(notif, event.params.notifId);
     } catch (err) {
-      console.error(`onNotificationCreated: FCM send failed for ${notif.userId}:`, err.message);
+      console.error(`onNotificationCreated: push failed for ${notif?.userId}:`, err.message);
     }
   }
 );
+
+// ─── Stage 8.2 push delivery ────────────────────────────────────────────────
+// - Server-side preference: users/{uid}.notificationsEnabled === false → no
+//   push (the in-app notifications/{id} record is kept).
+// - Per-device tokens: fcm_tokens/{uid}/devices/{deviceId}.token (only the
+//   MAX_PUSH_DEVICES most recently refreshed registrations), plus the legacy
+//   single token fcm_tokens/{uid}.token written by older app versions;
+//   de-duplicated by token value.
+// - F-9: lock-screen text is fixed per type. Stored titles are fixed server
+//   strings; stored bodies can carry amounts or text another person typed
+//   (quotes, change requests, cancellation reasons), so no stored body is
+//   ever sent in a push. The in-app record keeps the full text.
+// - Invalid-token cleanup only for FCM's "not registered" / "invalid token"
+//   errors, compare-and-delete; transient failures keep the token.
+const INVALID_TOKEN_CODES = new Set([
+  'messaging/registration-token-not-registered',
+  'messaging/invalid-registration-token',
+]);
+
+// F-8: bounded fan-out and storage per account.
+const MAX_PUSH_DEVICES = 10;
+const FCM_BATCH_LIMIT = 500; // messaging.sendEach() accepts at most 500 messages
+// Registrations not refreshed for this long are removed. The app refreshes
+// its registration on every signed-in start; 270 days matches the period
+// after which FCM itself treats an inactive Android token as expired, so a
+// dormant but valid install is not cut off early.
+const STALE_DEVICE_DAYS = 270;
+
+const PUSH_GENERIC = {
+  message_received: { title: 'New message', body: 'You have a new message about one of your jobs.' },
+  dispute_raised: { title: 'Dispute update', body: 'There is an update on a dispute for one of your jobs.' },
+  payout_completed: { title: 'Payout update', body: 'There is an update about a payout. Open HandyTrust for details.' },
+  payout_blocked: { title: 'Payout update', body: 'There is an update about a payout. Open HandyTrust for details.' },
+};
+
+// Reviewed fixed bodies (no amounts, names or user-written text).
+const PUSH_BODY_BY_TYPE = {
+  quote_received: 'You have a new quote on one of your jobs.',
+  quote_withdrawn: 'A quote on one of your jobs was withdrawn.',
+  quote_rejected: 'There is an update on one of your quotes.',
+  agreement_pending: 'There is an agreement for you to review.',
+  agreement_accepted: 'The agreement was accepted. Open HandyTrust to continue.',
+  agreement_changes_requested: 'Changes were requested to an agreement. Open HandyTrust to review.',
+  job_assigned: 'You have a new booking request. Open HandyTrust to respond.',
+  job_status_update: 'There is an update on one of your jobs.',
+  review_received: 'You received a new review.',
+};
+const PUSH_DEFAULT_BODY = 'Open HandyTrust for details.';
+
+function _pushContent(notif) {
+  const generic = PUSH_GENERIC[notif.type];
+  if (generic) return generic;
+  return {
+    title: String(notif.title || 'HandyTrust').slice(0, 120),
+    body: PUSH_BODY_BY_TYPE[notif.type] || PUSH_DEFAULT_BODY,
+  };
+}
+
+// Overridable sender (tests): receives FCM messages, returns per-message
+// results { success, error?: { code } } in the same order.
+const _defaultPushSend = async (messages) => {
+  const out = [];
+  for (let i = 0; i < messages.length; i += FCM_BATCH_LIMIT) {
+    const res = await messaging.sendEach(messages.slice(i, i + FCM_BATCH_LIMIT));
+    for (const r of res.responses) out.push({ success: r.success, error: r.error ? { code: r.error.code } : undefined });
+  }
+  return out;
+};
+let _pushSend = _defaultPushSend;
+exports._setPushSender = (fn) => { _pushSend = fn || _defaultPushSend; };
+
+async function _collectTokens(uid) {
+  const [devices, legacy] = await Promise.all([
+    db.collection('fcm_tokens').doc(uid).collection('devices')
+      .orderBy('updatedAt', 'desc').limit(MAX_PUSH_DEVICES).get(),
+    db.collection('fcm_tokens').doc(uid).get(),
+  ]);
+  const byToken = new Map(); // token -> [{ ref, legacy }]
+  for (const d of devices.docs) {
+    const t = d.data().token;
+    if (typeof t === 'string' && t.length > 0) {
+      if (!byToken.has(t)) byToken.set(t, []);
+      byToken.get(t).push({ ref: d.ref, legacy: false });
+    }
+  }
+  const lt = legacy.exists ? legacy.data().token : null;
+  if (typeof lt === 'string' && lt.length > 0) {
+    if (!byToken.has(lt)) byToken.set(lt, []);
+    byToken.get(lt).push({ ref: legacy.ref, legacy: true });
+  }
+  return byToken;
+}
+
+async function _deliverPush(notif, notifId) {
+  if (!notif?.userId) return { status: 'skipped', reason: 'no_user' };
+  const user = await db.collection('users').doc(notif.userId).get();
+  if (user.exists && user.data().notificationsEnabled === false) {
+    console.log(JSON.stringify({ event: 'push_skipped', reason: 'preference_off', notifId, type: notif.type }));
+    return { status: 'skipped', reason: 'preference_off' };
+  }
+  const tokens = await _collectTokens(notif.userId);
+  if (tokens.size === 0) return { status: 'skipped', reason: 'no_tokens' };
+
+  const { title, body } = _pushContent(notif);
+  const route = notif.route || (notif.jobId ? `/job/${notif.jobId}` : '/notifications');
+  const list = [...tokens.keys()];
+  const messages = list.map((token) => ({
+    token,
+    notification: { title, body },
+    // `uid` lets the app hide a foreground notification addressed to an
+    // account that is not the one signed in on this device (F-6/F-11).
+    data: { type: notif.type || '', jobId: notif.jobId || '', route, chatWith: notif.chatWith || '', uid: notif.userId },
+    android: { priority: 'high', notification: { channelId: 'handy_trust_main', visibility: 'private' } },
+    apns: { payload: { aps: { sound: 'default' } } },
+  }));
+  const results = await _pushSend(messages);
+  let sent = 0;
+  let removed = 0;
+  let transient = 0;
+  for (let i = 0; i < list.length; i++) {
+    const r = results[i] || { success: false, error: { code: 'unknown' } };
+    if (r.success) { sent++; continue; }
+    const code = (r.error && r.error.code) || 'unknown';
+    if (!INVALID_TOKEN_CODES.has(code)) { transient++; continue; }
+    // Remove only the registrations that still hold the failed token.
+    for (const { ref, legacy } of tokens.get(list[i])) {
+      try {
+        const did = await db.runTransaction(async (tx) => {
+          const snap = await tx.get(ref);
+          if (!snap.exists || snap.data().token !== list[i]) return false;
+          if (legacy) tx.update(ref, { token: admin.firestore.FieldValue.delete() });
+          else tx.delete(ref);
+          return true;
+        });
+        if (did) removed++;
+      } catch (err) {
+        console.error(`push: token cleanup failed for ${notif.userId}:`, err.message);
+      }
+    }
+  }
+  console.log(JSON.stringify({ event: 'push_result', notifId, type: notif.type, devices: list.length, sent, removed, transient }));
+  return { status: 'sent', devices: list.length, sent, removed, transient };
+}
+
+// ─── Token ownership (F-7) ──────────────────────────────────────────────────
+// A device token belongs to the registration written most recently: newest
+// `updatedAt` wins, ties broken by document path. Every removal re-reads the
+// registration in a transaction (compare-and-delete), and a trigger event
+// that no longer matches the stored registration does nothing, so late,
+// duplicate or concurrent events converge on exactly one owner and a token
+// refreshed in the meantime is never removed.
+function _cmpTs(a, b) {
+  const as = a && typeof a.seconds === 'number' ? a.seconds : -1;
+  const bs = b && typeof b.seconds === 'number' ? b.seconds : -1;
+  if (as !== bs) return as < bs ? -1 : 1;
+  const an = a && typeof a.nanoseconds === 'number' ? a.nanoseconds : 0;
+  const bn = b && typeof b.nanoseconds === 'number' ? b.nanoseconds : 0;
+  return an === bn ? 0 : (an < bn ? -1 : 1);
+}
+
+function _isNewerRegistration(aTs, aPath, bTs, bPath) {
+  const c = _cmpTs(aTs, bTs);
+  return c > 0 || (c === 0 && aPath > bPath);
+}
+
+// Releases `ref`'s hold on `token` only if it still holds it AND is older
+// than the winning registration.
+async function _releaseIfOlder(ref, token, winnerTs, winnerPath, { legacy = false } = {}) {
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists || snap.data().token !== token) return false;
+    if (_isNewerRegistration(snap.data().updatedAt, ref.path, winnerTs, winnerPath)) return false;
+    if (legacy) tx.update(ref, { token: admin.firestore.FieldValue.delete() });
+    else tx.delete(ref);
+    return true;
+  });
+}
+
+async function _releaseTokenElsewhere(uid, deviceId, token, eventUpdatedAt) {
+  if (typeof token !== 'string' || token.length === 0) return 0;
+  const mineRef = db.collection('fcm_tokens').doc(uid).collection('devices').doc(deviceId);
+  const mine = await mineRef.get();
+  // Stale or duplicate event: the registration has changed or gone since.
+  if (!mine.exists || mine.data().token !== token) return 0;
+  const myTs = mine.data().updatedAt;
+  if (eventUpdatedAt !== undefined && _cmpTs(eventUpdatedAt, myTs) !== 0) return 0;
+
+  const [devices, legacy] = await Promise.all([
+    db.collectionGroup('devices').where('token', '==', token).get(),
+    db.collection('fcm_tokens').where('token', '==', token).get(),
+  ]);
+  let released = 0;
+  for (const d of devices.docs) {
+    const userDoc = d.ref.parent.parent;
+    if (!userDoc || userDoc.parent.id !== 'fcm_tokens') continue;
+    if (d.ref.path === mineRef.path) continue;
+    if (await _releaseIfOlder(d.ref, token, myTs, mineRef.path)) released++;
+  }
+  for (const d of legacy.docs) {
+    if (d.id === uid) continue; // same account: de-duplicated at send time
+    if (await _releaseIfOlder(d.ref, token, myTs, mineRef.path, { legacy: true })) released++;
+  }
+  return released;
+}
+
+// F-8: keeps at most MAX_PUSH_DEVICES registrations per account (newest
+// first); older ones are removed unless refreshed in the meantime.
+async function _pruneDevices(uid) {
+  const extra = await db.collection('fcm_tokens').doc(uid).collection('devices')
+    .orderBy('updatedAt', 'desc').offset(MAX_PUSH_DEVICES).limit(50).get();
+  let removed = 0;
+  for (const d of extra.docs) {
+    const seen = d.data().updatedAt;
+    const did = await db.runTransaction(async (tx) => {
+      const s = await tx.get(d.ref);
+      if (!s.exists || _cmpTs(s.data().updatedAt, seen) !== 0) return false;
+      tx.delete(d.ref);
+      return true;
+    });
+    if (did) removed++;
+  }
+  return removed;
+}
+
+// F-8: removes registrations not refreshed for STALE_DEVICE_DAYS.
+async function _sweepStaleDevices(nowMs = Date.now(), maxAgeDays = STALE_DEVICE_DAYS, limit = 500) {
+  const cutoff = admin.firestore.Timestamp.fromMillis(nowMs - maxAgeDays * 24 * 60 * 60 * 1000);
+  const snap = await db.collectionGroup('devices').where('updatedAt', '<', cutoff).limit(limit).get();
+  let removed = 0;
+  for (const d of snap.docs) {
+    const userDoc = d.ref.parent.parent;
+    if (!userDoc || userDoc.parent.id !== 'fcm_tokens') continue;
+    const did = await db.runTransaction(async (tx) => {
+      const s = await tx.get(d.ref);
+      if (!s.exists || _cmpTs(s.data().updatedAt, cutoff) >= 0) return false; // refreshed meanwhile
+      tx.delete(d.ref);
+      return true;
+    });
+    if (did) removed++;
+  }
+  console.log(JSON.stringify({ event: 'device_sweep', removed }));
+  return removed;
+}
+
+exports.onDeviceTokenWritten = onDocumentWritten('fcm_tokens/{uid}/devices/{deviceId}', async (event) => {
+  const after = event.data && event.data.after && event.data.after.exists ? event.data.after.data() : null;
+  if (!after) return;
+  try {
+    await _releaseTokenElsewhere(event.params.uid, event.params.deviceId, after.token, after.updatedAt ?? null);
+    await _pruneDevices(event.params.uid);
+  } catch (err) {
+    console.error('onDeviceTokenWritten: release failed:', err.message);
+  }
+});
+
+exports.sweepStaleDeviceTokens = onSchedule('every 24 hours', async () => {
+  await _sweepStaleDevices();
+});
+
+exports._deliverPush = _deliverPush;
+exports._pushContent = _pushContent;
+exports._releaseTokenElsewhere = _releaseTokenElsewhere;
+exports._releaseIfOlder = _releaseIfOlder;
+exports._pruneDevices = _pruneDevices;
+exports._sweepStaleDevices = _sweepStaleDevices;
+exports.INVALID_TOKEN_CODES = INVALID_TOKEN_CODES;
+exports.MAX_PUSH_DEVICES = MAX_PUSH_DEVICES;
 
 // ─── Reconciliation sweep — catches any release stuck in pending/processing ──
 // Runs daily. Does not retry automatically (a stuck transfer usually means
@@ -2432,8 +2685,13 @@ async function _handleQuoteWrite(jobId, before, after, eventId) {
 
 async function _handleMessageCreated(jobId, msg, eventId) {
   if (!msg?.receiverId || msg.receiverId === msg.senderId || msg.type === 'system') return null;
+  // Stage 8.2: the tap opens this exact conversation (pre-booking jobs can
+  // hold several). F-1: `route` stays /job/{jobId}, which older app versions
+  // open correctly (their /chat route needs navigation extras a tap doesn't
+  // carry); new versions build the chat route from `chatWith`. The in-app
+  // record keeps the preview; the push does not.
   await _sendInAppNotification(msg.receiverId, 'message_received', 'New Message', _messagePreview(msg), jobId,
-    { dedupeKey: `${eventId}_${msg.receiverId}` });
+    { dedupeKey: `${eventId}_${msg.receiverId}`, chatWith: msg.senderId });
   return 'message_received';
 }
 
@@ -4145,3 +4403,22 @@ exports.adminDeleteUser = onCall(async (request) => {
 
   return { success: true };
 });
+
+// ─── RumptyCloud staging media (emulator / staging only) ────────────────────
+// Synthetic test media; see functions/media.js and
+// design/RUMPTYCLOUD_STAGING_INTEGRATION_IMPLEMENTATION_REPORT.md.
+// Exported only for a local `demo-*` emulator project or `handytrust-staging`,
+// decided from the project id that function discovery always receives (the
+// emulator discovers functions before it reads .env files, so an .env switch
+// cannot be used). A build for the production project never contains them.
+const _MEDIA_PROJECT_RE = /^(demo-[a-z0-9-]+|handytrust-staging)$/;
+function _discoveryProjectId() {
+  try {
+    const cfg = JSON.parse(process.env.FIREBASE_CONFIG || '{}');
+    if (cfg.projectId) return cfg.projectId;
+  } catch (_) { /* fall through */ }
+  return process.env.GCLOUD_PROJECT || '';
+}
+if (_MEDIA_PROJECT_RE.test(_discoveryProjectId())) {
+  Object.assign(exports, require('./media').callables);
+}

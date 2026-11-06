@@ -1,11 +1,21 @@
 plugins {
     id("com.android.application")
     // START: FlutterFire Configuration
-    id("com.google.gms.google-services")
+    // com.google.gms.google-services is applied just below this block, so a
+    // local emulator build can leave the production config out.
     // END: FlutterFire Configuration
     id("kotlin-android")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+// Production Firebase configuration (google-services.json). Applied to every
+// build EXCEPT a local emulator build made with HT_EMULATOR=true in the build
+// environment: that build has no production config compiled in, so the app
+// can only start against the local demo emulator project
+// (lib/core/firebase/emulator_config.dart; RumptyCloud staging media tests).
+if (System.getenv("HT_EMULATOR") != "true") {
+    apply(plugin = "com.google.gms.google-services")
 }
 
 android {

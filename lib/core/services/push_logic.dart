@@ -17,12 +17,30 @@ abstract final class PushLogic {
   /// to `/job/{id}`; a new-message notification should open the
   /// conversation instead, so `message_received` maps to `/chat/{id}` (the
   /// chat screen resolves the other participant from the job).
-  static String destination({String? type, String? jobId, String? route}) {
+  static String destination({String? type, String? jobId, String? route, String? chatWith}) {
     final id = jobId ?? '';
+    // Stage 8.2 (F-1): the server keeps `route: /job/{jobId}` (what older
+    // app versions open) and names the other participant in `chatWith`.
+    if (type == 'message_received' && isSafeId(id) && isSafeId(chatWith)) return '/chat/$id?with=$chatWith';
     if (type == 'message_received' && id.isNotEmpty && !id.contains('/')) return '/chat/$id';
     if (route != null && route.isNotEmpty) return safeRoute(route);
     if (id.isNotEmpty && !id.contains('/')) return '/job/$id';
     return '/notifications';
+  }
+
+  /// A Firestore document id or Firebase uid that is safe to put in a route
+  /// (no path, query or fragment characters).
+  static bool isSafeId(String? v) => v != null && RegExp(r'^[A-Za-z0-9_-]{1,128}$').hasMatch(v);
+
+  /// Whether a push that arrives while the app is open should be shown
+  /// (F-6/F-11). The server names the recipient in `uid`; a push for any
+  /// other account (a previous account on this device, or a registration
+  /// another account claimed) is not shown. Pushes from servers that do not
+  /// send `uid` yet are shown to a signed-in user, as before.
+  static bool shouldShowForeground({required String? targetUid, required String? currentUid, required bool enabled}) {
+    if (!enabled || currentUid == null || currentUid.isEmpty) return false;
+    if (targetUid == null || targetUid.isEmpty) return true;
+    return targetUid == currentUid;
   }
 
   /// What the device should do with its push registration.
