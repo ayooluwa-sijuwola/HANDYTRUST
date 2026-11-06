@@ -5,6 +5,9 @@
 // firestore-tests/media_rules.test.js.
 process.env.FIRESTORE_EMULATOR_HOST = process.env.FIRESTORE_EMULATOR_HOST || '127.0.0.1:8090';
 process.env.GCLOUD_PROJECT = 'demo-handytrust-media-offline';
+// One project id for everything: `firebase emulators:exec` also sets
+// FIREBASE_CONFIG (another project), which the Admin SDK would follow.
+delete process.env.FIREBASE_CONFIG;
 
 const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
@@ -492,6 +495,38 @@ describe('T1-11 missing or invalid configuration, and nothing secret in logs or 
     assert.ok(logs.length > 3);
     for (const s of [...SECRET_VALUES, ...KEY_IDS]) assert.ok(!text.includes(s), 'leaked value');
     assert.ok(text.includes('"errorName":"ServiceUnavailable"'));
+  });
+});
+
+describe('T1-11b key roles and environment', () => {
+  const buf = () => fixture('synthetic_64x48.png');
+  const ask = () => H.requestMediaUpload(req('u1', { kind: 'test-portfolio', mimeType: 'image/png', sizeBytes: buf().length, sha256: sha(buf()) }));
+  const problems = (env) => media._config({ ...process.env, ...env }).problems;
+  test('refuses to run for the production project (or any non-demo, non-staging project)', async () => {
+    for (const projectId of ['handytrust', 'other-project', '']) {
+      assert.ok(problems({ GCLOUD_PROJECT: projectId, FIREBASE_CONFIG: JSON.stringify({ projectId }) }).includes('project'), projectId);
+    }
+    assert.deepEqual(problems({ GCLOUD_PROJECT: 'handytrust-staging', FIREBASE_CONFIG: '' }), []);
+    const saved = process.env.GCLOUD_PROJECT;
+    process.env.GCLOUD_PROJECT = 'handytrust';
+    try {
+      await assert.rejects(ask(), code('failed-precondition'));
+    } finally {
+      process.env.GCLOUD_PROJECT = saved;
+    }
+  });
+  test('the cleanup key may not silently be the app key; one key only by explicit owner choice', () => {
+    const same = Object.fromEntries([['RUMPTY_CLEANUP_ACCESS_KEY_ID', KEY_IDS[0]], ['RUMPTY_CLEANUP_SECRET_ACCESS_KEY', SECRET_VALUES[0]]]);
+    assert.ok(problems(same).includes('cleanup_key_same_as_signer'));
+    assert.ok(problems({ RUMPTY_CLEANUP_ACCESS_KEY_ID: '', RUMPTY_CLEANUP_SECRET_ACCESS_KEY: '' }).includes('cleanup_key'));
+    assert.deepEqual(problems({ ...same, RUMPTY_SINGLE_KEY_ACCEPTED: 'true' }), []);
+    assert.deepEqual(problems({ RUMPTY_CLEANUP_ACCESS_KEY_ID: '', RUMPTY_CLEANUP_SECRET_ACCESS_KEY: '', RUMPTY_SINGLE_KEY_ACCEPTED: 'true' }), []);
+  });
+  test('reconciliation without list permission reports "unavailable" and still completes the sweep', async () => {
+    store.list = async () => { throw Object.assign(new Error('denied'), { name: 'AccessDenied', $metadata: { httpStatusCode: 403 } }); };
+    const s = await media._sweepMedia(media._config(), { reconcile: true });
+    assert.equal(s.reconcile, 'unavailable');
+    assert.deepEqual(s.orphans, []);
   });
 });
 

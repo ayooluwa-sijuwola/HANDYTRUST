@@ -7,7 +7,12 @@
 //   - every operation is a callable that checks Firebase Auth + Firestore;
 //   - `media/{id}` is the record of truth (written only here);
 //   - RumptyCloud keys exist only in this process (Functions secrets / the
-//     emulator's functions/.secret.local) and never reach the client;
+//     emulator's functions/.secret.local) and never reach the client:
+//       K1 RUMPTY_ACCESS_KEY_ID / RUMPTY_SECRET_ACCESS_KEY           read + write
+//       K2 RUMPTY_CLEANUP_ACCESS_KEY_ID / RUMPTY_CLEANUP_SECRET_ACCESS_KEY  delete (list optional)
+//     or, by explicit owner choice (RUMPTY_SINGLE_KEY_ACCEPTED=true), one key
+//     with read + write + delete;
+//   - it refuses to run for any project other than demo-* / handytrust-staging;
 //   - the client never supplies a bucket, object key, owner or URL.
 //
 // Upload modes:
@@ -84,7 +89,19 @@ function _setMediaStore(store) { _storeOverride = store || null; }
 const _nowTs = () => Timestamp.fromMillis(_nowMs());
 
 // ─── Configuration (names only are ever reported, never values) ─────────────
+// The project this process serves. Media runs only for a local `demo-*`
+// emulator project or `handytrust-staging` — never production (`handytrust`).
+const MEDIA_PROJECT_RE = /^(demo-[a-z0-9-]+|handytrust-staging)$/;
+function _projectId(env = process.env) {
+  try {
+    const cfg = JSON.parse(env.FIREBASE_CONFIG || '{}');
+    if (cfg.projectId) return cfg.projectId;
+  } catch (_) { /* fall through */ }
+  return env.GCLOUD_PROJECT || env.GOOGLE_CLOUD_PROJECT || '';
+}
+
 function _config(env = process.env) {
+  const singleKey = env.RUMPTY_SINGLE_KEY_ACCEPTED === 'true';
   const c = {
     bucket: env.RUMPTY_BUCKET || '',
     endpoint: env.RUMPTY_ENDPOINT || '',
@@ -93,14 +110,21 @@ function _config(env = process.env) {
     uploadMode: env.RUMPTY_UPLOAD_MODE === 'presigned' && env.RUMPTY_PRESIGNED_PUT_VERIFIED === 'true' ? 'presigned' : 'proxy',
     signer: { accessKeyId: env.RUMPTY_ACCESS_KEY_ID || '', secretAccessKey: env.RUMPTY_SECRET_ACCESS_KEY || '' },
     janitor: { accessKeyId: env.RUMPTY_CLEANUP_ACCESS_KEY_ID || '', secretAccessKey: env.RUMPTY_CLEANUP_SECRET_ACCESS_KEY || '' },
+    singleKey,
+    projectId: _projectId(env),
   };
+  // Single-key mode is an explicit owner decision (one key with read + write
+  // + delete): the cleanup role then uses the same key. Never silent.
+  if (singleKey && !c.janitor.accessKeyId && !c.janitor.secretAccessKey) c.janitor = { ...c.signer };
   const problems = [];
+  if (!MEDIA_PROJECT_RE.test(c.projectId)) problems.push('project');
   if (c.endpoint !== ALLOWED_ENDPOINT) problems.push('endpoint');
   if (c.region !== ALLOWED_REGION) problems.push('region');
   if (!ALLOWED_BUCKETS.has(c.bucket)) problems.push('bucket');
   if (!PREFIX_RE.test(c.keyPrefix)) problems.push('key_prefix');
   if (!c.signer.accessKeyId || !c.signer.secretAccessKey) problems.push('signer_key');
   if (!c.janitor.accessKeyId || !c.janitor.secretAccessKey) problems.push('cleanup_key');
+  else if (!singleKey && c.janitor.accessKeyId === c.signer.accessKeyId) problems.push('cleanup_key_same_as_signer');
   return { ...c, problems };
 }
 
@@ -181,7 +205,8 @@ function _rumptyStore(cfg) {
     async presignGet({ key, expiresIn }) {
       return getSignedUrl(signer, new s3.GetObjectCommand({ Bucket, Key: key }), { expiresIn });
     },
-    // K2 (list + read + delete): deletion and reconciliation only.
+    // K2 (delete; list optional): deletion and the admin reconciliation
+    // report only. Verification after a delete uses K1's read permission.
     async remove(key) {
       try {
         await janitor.send(new s3.DeleteObjectCommand({ Bucket, Key: key }));
@@ -358,7 +383,7 @@ async function _attemptDelete(cfg, mediaId) {
   const store = _store(cfg);
   try {
     await store.remove(m.objectKey);
-    const h = await store.head(m.objectKey, { role: 'janitor' });
+    const h = await store.head(m.objectKey);
     if (h.exists) throw Object.assign(new Error('object still present'), { name: 'StillPresent' });
     const done = await _transition(mediaId, (cur) => (cur.status === 'deleting'
       ? { update: { status: cur.deleteFinalStatus || 'deleted', deletedAt: _nowTs(), nextDeleteAt: admin.firestore.FieldValue.delete() }, quota: 'released' }
@@ -713,7 +738,14 @@ async function _sweepMedia(cfg, { reconcile = false } = {}) {
     // REPORT ONLY: objects under this deployment's prefix with no live
     // record. Emulator data is ephemeral, so nothing is deleted here; an
     // operator removes specific keys deliberately.
-    const objects = await _store(cfg).list({ prefix: `${cfg.keyPrefix}/`, maxKeys: LIMITS.reconcileMaxKeys });
+    let objects = [];
+    try {
+      objects = await _store(cfg).list({ prefix: `${cfg.keyPrefix}/`, maxKeys: LIMITS.reconcileMaxKeys });
+    } catch (err) {
+      // Listing needs the optional list permission on the cleanup key.
+      out.reconcile = 'unavailable';
+      _log('media_reconcile_unavailable', _errFields(err));
+    }
     for (const o of objects) {
       const q = await db().collection('media').where('objectKey', '==', o.key).limit(1).get();
       const st = q.empty ? null : q.docs[0].data().status;
@@ -739,7 +771,7 @@ const callables = {
 
 module.exports = {
   handlers, callables,
-  _config, _sniff, _validateContent, _sha256, _sweepMedia, _attemptDelete, _verifyStoredObject,
+  _config, _projectId, MEDIA_PROJECT_RE, _sniff, _validateContent, _sha256, _sweepMedia, _attemptDelete, _verifyStoredObject,
   _setMediaStore, _setMediaClock, _rumptyStore, _moveQuota,
   KINDS, LIMITS, ALLOWED_BUCKETS, SIGNER_SECRETS, CLEANUP_SECRETS,
 };

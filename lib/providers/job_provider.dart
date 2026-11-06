@@ -1,4 +1,6 @@
+import 'dart:async' show TimeoutException;
 import 'dart:typed_data';
+import 'package:firebase_core/firebase_core.dart' show FirebaseException;
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/services/storage_service.dart';
@@ -115,14 +117,35 @@ class JobRequestNotifier extends StateNotifier<JobRequestState> {
       await _repository.createJob(job);
       debugPrint('[JobRequest] firestore write completed: jobId=$jobId');
       state = JobRequestState(createdJobId: jobId, failedImageCount: failedCount);
+    } on FirebaseException catch (e) {
+      // Keep the real cause in the device log (plugin + code), and only
+      // blame the network when the error actually is a connectivity one.
+      debugPrint('[JobRequest] submission failed: ${e.plugin}/${e.code}: ${e.message}');
+      state = JobRequestState(error: jobSubmitErrorMessage(e.code));
+    } on TimeoutException catch (e) {
+      debugPrint('[JobRequest] submission failed: timeout: $e');
+      state = JobRequestState(error: jobSubmitErrorMessage('deadline-exceeded'));
     } catch (e) {
-      debugPrint('[JobRequest] submission failed: $e');
-      state = JobRequestState(
-        error: 'Could not submit your job request. Check your connection and try again.',
-      );
+      debugPrint('[JobRequest] submission failed: ${e.runtimeType}: $e');
+      state = JobRequestState(error: jobSubmitErrorMessage('unknown'));
     }
   }
 }
+
+/// What the customer sees when a job could not be saved, by Firebase error
+/// code. Only connectivity codes mention the network: a server refusal
+/// (e.g. `permission-denied`, when the deployed Firestore rules do not
+/// accept the job) must not be reported as a connection problem.
+String jobSubmitErrorMessage(String code) => switch (code) {
+      'unavailable' || 'deadline-exceeded' || 'network-request-failed' =>
+        'No connection to HandyTrust. Check your network and try again.',
+      'unauthenticated' => 'Your session has expired. Please sign in again.',
+      'permission-denied' =>
+        'The server refused to save this job. This is not a network problem; please contact support. (permission-denied)',
+      'resource-exhausted' => 'Too many requests right now. Please wait a moment and try again.',
+      'unknown' => 'Something went wrong while saving your job. Please try again.',
+      _ => 'Something went wrong while saving your job. Please try again. ($code)',
+    };
 
 final jobRequestNotifierProvider =
     StateNotifierProvider<JobRequestNotifier, JobRequestState>(

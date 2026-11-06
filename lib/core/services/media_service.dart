@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../../models/media_ref.dart';
 
@@ -84,6 +85,14 @@ class MediaUploadProgress {
   final double? fraction;
 }
 
+/// A server-verified upload. [mode] is how the bytes travelled:
+/// 'presigned' (straight to RumptyCloud) or 'proxy' (through the Function).
+class MediaUploadResult {
+  const MediaUploadResult(this.mediaId, this.mode);
+  final String mediaId;
+  final String mode;
+}
+
 class MediaDeleteResult {
   const MediaDeleteResult(this.status, {required this.retryScheduled});
   final String status;
@@ -116,10 +125,10 @@ class MediaService {
   /// Forget temporary URLs (call on sign-out / account change).
   void clearCache() => _urls.clear();
 
-  /// Uploads [bytes] and returns the media id once the SERVER has verified
-  /// the stored object. On any failure after the request, the pending
-  /// record is released (best effort) so a retry starts clean.
-  Future<String> upload({
+  /// Uploads [bytes] and returns once the SERVER has verified the stored
+  /// object. On any failure after the request, the pending record is
+  /// released (best effort) so a retry starts clean.
+  Future<MediaUploadResult> upload({
     required String kind,
     required String mimeType,
     required Uint8List bytes,
@@ -154,7 +163,7 @@ class MediaService {
       final c = await _guard(() => _backend.call('confirmMediaUpload', {'mediaId': mediaId}, timeout: const Duration(seconds: 120)));
       if (c['status'] != 'verified') throw const MediaFailure(MediaFailureKind.unknown, 'The upload could not be verified.');
       onProgress?.call(const MediaUploadProgress(MediaUploadStage.done, fraction: 1));
-      return mediaId;
+      return MediaUploadResult(mediaId, req['mode'] == 'presigned' ? 'presigned' : 'proxy');
     } on MediaFailure {
       await _releaseQuietly(mediaId);
       rethrow;
@@ -195,6 +204,8 @@ class MediaService {
     } on MediaFailure {
       rethrow;
     } on FirebaseFunctionsException catch (e) {
+      // Diagnostics: error class only (never data, tokens or links).
+      debugPrint('[media] call failed: code=${e.code} message=${e.message}');
       throw mapFunctionsError(e.code, e.message, e.details);
     } on TimeoutException {
       throw const MediaFailure(MediaFailureKind.timeout, 'The request timed out. Check your connection and try again.');
@@ -234,6 +245,8 @@ class MediaService {
         return const MediaFailure(MediaFailureKind.unavailable, 'Media storage is unavailable. Check your connection and try again.');
       case 'deadline-exceeded':
         return const MediaFailure(MediaFailureKind.timeout, 'The request timed out. Please try again.');
+      case 'internal':
+        return const MediaFailure(MediaFailureKind.unavailable, 'The media service did not respond. Check that the Firebase emulators are running, then try again.');
       default:
         return const MediaFailure(MediaFailureKind.unknown, 'Something went wrong. Please try again.');
     }

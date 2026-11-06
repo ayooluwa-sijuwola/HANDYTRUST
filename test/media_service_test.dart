@@ -10,6 +10,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:handy_trust/core/firebase/emulator_config.dart';
 import 'package:handy_trust/core/services/media_service.dart';
+import 'package:handy_trust/firebase_options.dart';
 import 'package:handy_trust/models/media_ref.dart';
 
 class _Backend implements MediaBackend {
@@ -74,8 +75,8 @@ void main() {
   group('upload', () {
     test('proxy: request → upload content → confirm; success only after the server verified', () async {
       final stages = <MediaUploadStage>[];
-      final id = await service.upload(kind: 'test-portfolio', mimeType: 'image/png', bytes: bytes, onProgress: (p) => stages.add(p.stage));
-      expect(id, 'm1');
+      final r = await service.upload(kind: 'test-portfolio', mimeType: 'image/png', bytes: bytes, onProgress: (p) => stages.add(p.stage));
+      expect((r.mediaId, r.mode), ('m1', 'proxy'));
       expect(backend.names, ['requestMediaUpload', 'uploadMediaContent', 'confirmMediaUpload']);
       final req = backend.calls.first.$2;
       expect(req, {'kind': 'test-portfolio', 'mimeType': 'image/png', 'sizeBytes': 200, 'sha256': MediaService.sha256Hex(bytes)});
@@ -92,7 +93,8 @@ void main() {
             'upload': {'method': 'PUT', 'url': 'https://s3.rumptycloud.com/b/k?X-Amz-Signature=s', 'headers': {'Content-Type': 'image/png', 'Content-Length': '200'}},
           };
       final fractions = <double?>[];
-      await service.upload(kind: 'test-portfolio', mimeType: 'image/png', bytes: bytes, onProgress: (p) => p.stage == MediaUploadStage.uploading ? fractions.add(p.fraction) : null);
+      final r = await service.upload(kind: 'test-portfolio', mimeType: 'image/png', bytes: bytes, onProgress: (p) => p.stage == MediaUploadStage.uploading ? fractions.add(p.fraction) : null);
+      expect(r.mode, 'presigned');
       expect(uploader.url.toString(), 'https://s3.rumptycloud.com/b/k?X-Amz-Signature=s');
       expect(uploader.headers, {'Content-Type': 'image/png', 'Content-Length': '200'});
       expect(uploader.bytes, bytes);
@@ -162,7 +164,8 @@ void main() {
       'not-found': MediaFailureKind.notFound,
       'unavailable': MediaFailureKind.unavailable,
       'deadline-exceeded': MediaFailureKind.timeout,
-      'internal': MediaFailureKind.unknown,
+      'internal': MediaFailureKind.unavailable,
+      'data-loss': MediaFailureKind.unknown,
     };
     cases.forEach((code, kind) => expect(MediaService.mapFunctionsError(code, 'm', null).kind, kind, reason: code));
     expect(MediaService.mapFunctionsError('failed-precondition', 'Media storage is not configured.', null).kind, MediaFailureKind.notConfigured);
@@ -222,6 +225,10 @@ void main() {
     expect(EmulatorConfig.enabled, isFalse);
     expect(EmulatorConfig.projectId, startsWith('demo-'));
     expect(EmulatorConfig.options.projectId, EmulatorConfig.projectId);
-    expect(EmulatorConfig.options.apiKey, isNot(startsWith('AIza'))); // not a real API key
+    // Format-valid placeholder (Android SDK checks the format) that is
+    // visibly not a real key and is not the production key.
+    expect(EmulatorConfig.options.apiKey, matches(RegExp(r'^AIza[0-9A-Za-z_-]{35}$')));
+    expect(EmulatorConfig.options.apiKey, contains('DemoEmulatorOnly'));
+    expect(EmulatorConfig.options.apiKey, isNot(DefaultFirebaseOptions.android.apiKey));
   });
 }

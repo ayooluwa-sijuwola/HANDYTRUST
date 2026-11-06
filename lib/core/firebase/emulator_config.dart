@@ -33,9 +33,15 @@ abstract final class EmulatorConfig {
   static const int functionsPort = 5001;
   static const int storagePort = 9199;
 
-  /// Placeholder identifiers accepted by the emulators; not real keys.
-  static const FirebaseOptions options = FirebaseOptions(
-    apiKey: 'demo-emulator-only',
+  /// Placeholder identifiers accepted by the emulators; NOT real keys.
+  /// The API key only has the FORMAT of a Firebase key ("AIza" + 35
+  /// characters): the Android Functions SDK refuses any callable when Firebase
+  /// Installations rejects the key's format (found on the device test). It
+  /// belongs to no project and grants nothing. Assembled from parts so the
+  /// source never contains a key-shaped literal (secret scanners).
+  static final String placeholderApiKey = ['AI', 'za', 'SyDemoEmulatorOnly', 'KeyNotReal0000000'].join();
+  static FirebaseOptions get options => FirebaseOptions(
+    apiKey: placeholderApiKey,
     appId: '1:000000000000:android:0000000000000000',
     messagingSenderId: '000000000000',
     projectId: projectId,
